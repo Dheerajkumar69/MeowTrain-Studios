@@ -9,53 +9,108 @@ Provides real-time system stats including:
 
 Optimized for 0.5s polling — uses non-blocking cpu_percent() and
 keeps pynvml handle as a module-level singleton.
+
+GPU detection strategy:
+  1. Primary: pynvml (fast, reliable when installed)
+  2. Fallback: nvidia-smi CLI parsing (always works if drivers are installed)
+  3. Retries: if NVML init fails, retries every 30s (GPU may wake from suspend)
 """
 
+import logging
 import psutil
 import shutil
 import platform
+import subprocess
 import time
 from pathlib import Path
 from app.config import MODEL_CACHE_DIR
 
+logger = logging.getLogger("meowllm.hardware")
+
+# ── GPU defaults ─────────────────────────────────────────────────────
+_GPU_DEFAULTS = {
+    "gpu_available": False,
+    "gpu_name": None,
+    "gpu_vram_total_gb": None,
+    "gpu_vram_available_gb": None,
+    "gpu_vram_used_gb": None,
+    "gpu_usage_percent": None,
+    "gpu_memory_utilization_percent": None,
+    "gpu_temp_celsius": None,
+    "gpu_power_watts": None,
+    "gpu_power_limit_watts": None,
+    "gpu_fan_percent": None,
+}
+
 # ── NVIDIA GPU singleton handle ──────────────────────────────────────
 _nvml_initialized = False
 _gpu_handle = None
+_nvml_last_attempt = 0.0
+_NVML_RETRY_INTERVAL = 30.0  # seconds between retry attempts
 
 
 def _ensure_nvml():
-    """Initialize NVML once and cache the GPU handle."""
-    global _nvml_initialized, _gpu_handle
-    if _nvml_initialized:
-        return _gpu_handle is not None
-    _nvml_initialized = True
+    """
+    Initialize NVML and cache the GPU handle.
+
+    Unlike the old version that gave up permanently on first failure,
+    this retries every 30 seconds.  Covers:
+      - pynvml not installed at startup but pip-installed later
+      - GPU in suspend / power-save when server boots
+      - Transient driver hiccups
+    """
+    global _nvml_initialized, _gpu_handle, _nvml_last_attempt
+
+    # If already initialized successfully, validate the handle is still good
+    if _nvml_initialized and _gpu_handle is not None:
+        try:
+            import pynvml
+            # Quick health check — will throw if handle is stale
+            pynvml.nvmlDeviceGetMemoryInfo(_gpu_handle)
+            return True
+        except Exception:
+            # Handle went stale (e.g. GPU reset, driver reload) — reinitialize
+            logger.warning("NVML handle stale, reinitializing...")
+            _nvml_initialized = False
+            _gpu_handle = None
+
+    # Throttle retry attempts so we don't spam logs / waste cycles
+    now = time.time()
+    if _nvml_initialized is False and _gpu_handle is None:
+        if now - _nvml_last_attempt < _NVML_RETRY_INTERVAL:
+            return False
+    _nvml_last_attempt = now
+
     try:
         import pynvml
         pynvml.nvmlInit()
+        device_count = pynvml.nvmlDeviceGetCount()
+        if device_count == 0:
+            logger.info("NVML initialized but no GPU devices found")
+            _nvml_initialized = True
+            _gpu_handle = None
+            return False
         _gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        _nvml_initialized = True
+        name = pynvml.nvmlDeviceGetName(_gpu_handle)
+        if isinstance(name, bytes):
+            name = name.decode("utf-8")
+        logger.info("NVML initialized: %s", name)
         return True
-    except Exception:
+    except ImportError:
+        logger.debug("pynvml not installed — will use nvidia-smi fallback")
+        _gpu_handle = None
+        return False
+    except Exception as e:
+        logger.debug("NVML init failed (%s) — will retry in %.0fs", e, _NVML_RETRY_INTERVAL)
         _gpu_handle = None
         return False
 
 
-def _get_gpu_stats() -> dict:
-    """Get detailed GPU stats. Returns empty defaults if no GPU."""
-    defaults = {
-        "gpu_available": False,
-        "gpu_name": None,
-        "gpu_vram_total_gb": None,
-        "gpu_vram_available_gb": None,
-        "gpu_vram_used_gb": None,
-        "gpu_usage_percent": None,
-        "gpu_memory_utilization_percent": None,
-        "gpu_temp_celsius": None,
-        "gpu_power_watts": None,
-        "gpu_power_limit_watts": None,
-        "gpu_fan_percent": None,
-    }
+def _get_gpu_stats_nvml() -> dict | None:
+    """Get GPU stats via pynvml. Returns None if unavailable."""
     if not _ensure_nvml() or _gpu_handle is None:
-        return defaults
+        return None
 
     try:
         import pynvml
@@ -73,7 +128,13 @@ def _get_gpu_stats() -> dict:
         vram_used = round((mem.total - mem.free) / (1024 ** 3), 2)
 
         # Utilization
-        util = pynvml.nvmlDeviceGetUtilizationRates(h)
+        try:
+            util = pynvml.nvmlDeviceGetUtilizationRates(h)
+            gpu_util = util.gpu
+            mem_util = util.memory
+        except Exception:
+            gpu_util = None
+            mem_util = None
 
         # Temperature
         try:
@@ -106,15 +167,131 @@ def _get_gpu_stats() -> dict:
             "gpu_vram_total_gb": vram_total,
             "gpu_vram_available_gb": vram_free,
             "gpu_vram_used_gb": vram_used,
-            "gpu_usage_percent": util.gpu,
-            "gpu_memory_utilization_percent": util.memory,
+            "gpu_usage_percent": gpu_util,
+            "gpu_memory_utilization_percent": mem_util,
             "gpu_temp_celsius": temp,
             "gpu_power_watts": power_w,
             "gpu_power_limit_watts": power_limit_w,
             "gpu_fan_percent": fan,
         }
-    except Exception:
-        return defaults
+    except Exception as e:
+        # Handle went bad mid-query — force reinit next time
+        logger.debug("NVML query failed: %s", e)
+        _force_nvml_reinit()
+        return None
+
+
+def _force_nvml_reinit():
+    """Reset NVML state so next call retries initialization."""
+    global _nvml_initialized, _gpu_handle
+    _nvml_initialized = False
+    _gpu_handle = None
+
+
+# ── nvidia-smi CLI fallback ──────────────────────────────────────────
+_smi_cache: dict | None = None
+_smi_cache_time = 0.0
+_SMI_CACHE_TTL = 2.0  # seconds
+
+
+def _get_gpu_stats_smi() -> dict | None:
+    """
+    Fallback GPU detection via nvidia-smi CLI.
+
+    Slower than pynvml (~50ms subprocess) but always works if the
+    NVIDIA driver is installed, even without pynvml.  Results are
+    cached for 2 seconds to avoid subprocess spam.
+    """
+    global _smi_cache, _smi_cache_time
+    now = time.time()
+    if _smi_cache is not None and now - _smi_cache_time < _SMI_CACHE_TTL:
+        return _smi_cache
+
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total,memory.free,memory.used,"
+                "utilization.gpu,utilization.memory,temperature.gpu,"
+                "power.draw,power.limit,fan.speed",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+
+        line = result.stdout.strip().split("\n")[0]
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 6:
+            return None
+
+        def _safe_float(val: str) -> float | None:
+            try:
+                v = val.strip()
+                if v in ("[Not Supported]", "N/A", "[N/A]", ""):
+                    return None
+                return float(v)
+            except (ValueError, TypeError):
+                return None
+
+        name = parts[0].strip()
+        mem_total_mb = _safe_float(parts[1])
+        mem_free_mb = _safe_float(parts[2])
+        mem_used_mb = _safe_float(parts[3])
+        gpu_util = _safe_float(parts[4])
+        mem_util = _safe_float(parts[5])
+        temp = _safe_float(parts[6]) if len(parts) > 6 else None
+        power = _safe_float(parts[7]) if len(parts) > 7 else None
+        power_limit = _safe_float(parts[8]) if len(parts) > 8 else None
+        fan = _safe_float(parts[9]) if len(parts) > 9 else None
+
+        stats = {
+            "gpu_available": True,
+            "gpu_name": name,
+            "gpu_vram_total_gb": round(mem_total_mb / 1024, 2) if mem_total_mb else None,
+            "gpu_vram_available_gb": round(mem_free_mb / 1024, 2) if mem_free_mb else None,
+            "gpu_vram_used_gb": round(mem_used_mb / 1024, 2) if mem_used_mb else None,
+            "gpu_usage_percent": int(gpu_util) if gpu_util is not None else None,
+            "gpu_memory_utilization_percent": int(mem_util) if mem_util is not None else None,
+            "gpu_temp_celsius": int(temp) if temp is not None else None,
+            "gpu_power_watts": round(power, 1) if power is not None else None,
+            "gpu_power_limit_watts": round(power_limit, 1) if power_limit is not None else None,
+            "gpu_fan_percent": int(fan) if fan is not None else None,
+        }
+
+        _smi_cache = stats
+        _smi_cache_time = now
+        return stats
+
+    except FileNotFoundError:
+        # nvidia-smi not installed
+        return None
+    except Exception as e:
+        logger.debug("nvidia-smi fallback failed: %s", e)
+        return None
+
+
+def _get_gpu_stats() -> dict:
+    """
+    Get GPU stats.  Tries pynvml first (fast), falls back to
+    nvidia-smi CLI (always works with drivers), returns defaults
+    if neither succeeds.
+    """
+    # Primary: pynvml (microseconds, in-process)
+    stats = _get_gpu_stats_nvml()
+    if stats is not None:
+        return stats
+
+    # Fallback: nvidia-smi CLI (milliseconds, subprocess)
+    stats = _get_gpu_stats_smi()
+    if stats is not None:
+        return stats
+
+    # No GPU detected
+    return dict(_GPU_DEFAULTS)
 
 
 # ── CPU name (cached, read once) ─────────────────────────────────────
