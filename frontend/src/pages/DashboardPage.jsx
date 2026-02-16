@@ -15,6 +15,21 @@ import {
 const USE_ICONS = { chatbot: <Bot className="w-5 h-5" />, code: <Code className="w-5 h-5" />, qa: <MessageCircle className="w-5 h-5" />, custom: <Wand2 className="w-5 h-5" /> };
 const USE_COLORS = { chatbot: 'from-blue-500 to-cyan-400', code: 'from-violet-500 to-purple-400', qa: 'from-amber-500 to-orange-400', custom: 'from-emerald-500 to-teal-400' };
 
+function ProgressBar({ value, max, color = 'bg-primary-500', label }) {
+    const pct = max > 0 ? Math.min((value / max) * 100, 100) : 0;
+    return (
+        <div className="space-y-1">
+            <div className="flex justify-between text-xs text-surface-500">
+                <span>{label}</span>
+                <span>{pct.toFixed(0)}%</span>
+            </div>
+            <div className="h-2 bg-surface-100 rounded-full overflow-hidden">
+                <div className={`h-full rounded-full transition-all duration-500 ease-out ${color}`} style={{ width: `${pct}%` }} />
+            </div>
+        </div>
+    );
+}
+
 export default function DashboardPage() {
     const { user, logout } = useAuth();
     const navigate = useNavigate();
@@ -39,9 +54,9 @@ export default function DashboardPage() {
         const loadProjects = async () => {
             try {
                 const res = await projectsAPI.list();
-                setProjects(res.data);
+                setProjects(res.data?.items ?? res.data ?? []);
             } catch (err) {
-                console.error('Failed to load projects:', err);
+                // silently handle error — UI shows no projects
             } finally {
                 setLoading(false);
             }
@@ -61,7 +76,7 @@ export default function DashboardPage() {
             }
         };
         pollHardware();
-        hwPollRef.current = setInterval(pollHardware, 500);
+        hwPollRef.current = setInterval(pollHardware, 3000);
         return () => clearInterval(hwPollRef.current);
     }, []);
 
@@ -99,25 +114,14 @@ export default function DashboardPage() {
 
     const filtered = projects.filter((p) => p.name?.toLowerCase().includes(search.toLowerCase()));
 
-    const ProgressBar = ({ value, max, color = 'bg-primary-500', label }) => {
-        const pct = max > 0 ? Math.min((value / max) * 100, 100) : 0;
-        return (
-            <div className="space-y-1">
-                <div className="flex justify-between text-xs text-surface-500">
-                    <span>{label}</span>
-                    <span>{pct.toFixed(0)}%</span>
-                </div>
-                <div className="h-2 bg-surface-100 rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full transition-all duration-500 ease-out ${color}`} style={{ width: `${pct}%` }} />
-                </div>
-            </div>
-        );
-    };
-
     return (
-        <div className="min-h-screen bg-surface-50 flex">
-            {/* Sidebar */}
-            <aside className="w-64 bg-white border-r border-surface-100 flex flex-col animate-slide-in-left">
+        <div className="min-h-screen bg-surface-50 flex flex-col md:flex-row">
+            {/* Skip link */}
+            <a href="#dashboard-main" className="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:top-2 focus:left-2 focus:px-4 focus:py-2 focus:bg-primary-600 focus:text-white focus:rounded-lg focus:text-sm">
+                Skip to main content
+            </a>
+            {/* Sidebar — hidden on mobile, shown on md+ */}
+            <aside className="hidden md:flex w-64 bg-white border-r border-surface-100 flex-col animate-slide-in-left" role="complementary" aria-label="Sidebar navigation">
                 <div className="p-5 border-b border-surface-100">
                     <div className="flex items-center gap-3">
                         <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center">
@@ -175,17 +179,33 @@ export default function DashboardPage() {
                         </div>
                         <span className="text-sm text-surface-700 truncate">{user?.display_name || 'User'}</span>
                     </div>
-                    <button onClick={logout} className="text-surface-400 hover:text-danger-500 transition-colors" title="Sign out">
-                        <LogOut className="w-4 h-4" />
+                    <button onClick={logout} className="text-surface-400 hover:text-danger-500 transition-colors focus:outline-none focus:ring-2 focus:ring-danger-500/50 rounded" aria-label="Sign out">
+                        <LogOut className="w-4 h-4" aria-hidden="true" />
                     </button>
                 </div>
             </aside>
 
+            {/* Mobile top bar — shown on mobile only */}
+            <header className="flex md:hidden items-center justify-between bg-white border-b border-surface-100 px-4 py-3" role="banner">
+                <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center">
+                        <Cat className="w-5 h-5 text-white" aria-hidden="true" />
+                    </div>
+                    <div>
+                        <h1 className="font-bold text-surface-900 text-sm">MeowLLM Studio</h1>
+                        <p className="text-xs text-surface-500">Local AI Training</p>
+                    </div>
+                </div>
+                <button onClick={logout} className="text-surface-400 hover:text-danger-500 transition-colors" aria-label="Sign out">
+                    <LogOut className="w-4 h-4" />
+                </button>
+            </header>
+
             {/* Main Content */}
-            <main className="flex-1 p-8 overflow-auto">
+            <main id="dashboard-main" className="flex-1 p-4 sm:p-6 md:p-8 overflow-auto" role="main">
                 <div className="max-w-6xl mx-auto animate-fade-in">
                     {/* Header */}
-                    <div className="flex items-center justify-between mb-8">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
                         <div>
                             <h2 className="text-2xl font-bold text-surface-900">Welcome back, {user?.display_name || 'User'} 👋</h2>
                             <p className="text-surface-500 mt-1">Manage your AI training projects</p>
@@ -216,7 +236,7 @@ export default function DashboardPage() {
                         <div className="glass rounded-2xl p-6 mb-8 border border-surface-200">
                             <h3 className="text-sm font-semibold text-surface-700 mb-4 flex items-center gap-2">
                                 <Settings className="w-4 h-4" /> Hardware Status
-                                <span className="ml-auto text-xs text-emerald-500 font-normal animate-pulse">● Live (0.5s)</span>
+                                <span className="ml-auto text-xs text-emerald-500 font-normal animate-pulse">● Live (3s)</span>
                             </h3>
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                 {/* CPU */}

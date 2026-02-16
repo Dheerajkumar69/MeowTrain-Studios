@@ -47,15 +47,49 @@ def _setup_test_db():
 
 
 @pytest.fixture(autouse=True)
+def _cleanup_module_state():
+    """Clear module-level mutable state between tests to prevent cross-test contamination."""
+    yield
+    # background_tasks table is cleaned automatically by _setup_test_db (drop_all),
+    # but clear any remaining in-memory lock state just in case
+    try:
+        from app.routes.models import _download_lock, _gguf_lock
+        # Just ensure locks are released (no dict cleanup needed — state is in DB now)
+        # This is a no-op safeguard
+    except ImportError:
+        pass
+
+
+@pytest.fixture(autouse=True)
 def _disable_rate_limit():
     """Disable rate limiting in tests."""
     limiter.enabled = False
-    # Also disable the route-level limiter in auth
+    # Also disable the route-level limiters
     from app.routes.auth import _limiter as auth_limiter
     auth_limiter.enabled = False
+    try:
+        from app.routes.inference import _limiter as inference_limiter
+        inference_limiter.enabled = False
+    except ImportError:
+        pass
+    try:
+        from app.routes.datasets import limiter as datasets_limiter
+        datasets_limiter.enabled = False
+    except ImportError:
+        pass
     yield
     limiter.enabled = True
     auth_limiter.enabled = True
+    try:
+        from app.routes.inference import _limiter as inference_limiter
+        inference_limiter.enabled = True
+    except ImportError:
+        pass
+    try:
+        from app.routes.datasets import limiter as datasets_limiter
+        datasets_limiter.enabled = True
+    except ImportError:
+        pass
 
 
 @pytest.fixture(scope="function")
@@ -86,7 +120,7 @@ def client(db: Session):
 @pytest.fixture
 def auth_headers(client: TestClient) -> dict:
     """Register a test user and return auth headers."""
-    resp = client.post("/auth/register", json={
+    resp = client.post("/api/auth/register", json={
         "email": "test@example.com",
         "password": "TestPass123",
         "display_name": "Test User",
@@ -99,7 +133,7 @@ def auth_headers(client: TestClient) -> dict:
 @pytest.fixture
 def project_id(client: TestClient, auth_headers: dict) -> int:
     """Create a test project and return its ID."""
-    resp = client.post("/projects/", json={
+    resp = client.post("/api/projects/", json={
         "name": "Test Project",
         "description": "A test project for unit testing",
     }, headers=auth_headers)

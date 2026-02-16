@@ -12,6 +12,17 @@ class User(Base):
     password_hash = Column(String, nullable=True)
     display_name = Column(String, default="User")
     is_guest = Column(Boolean, default=False)
+    role = Column(String, default="member")  # admin | member | guest
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    password_reset_token = Column(String, nullable=True)
+    password_reset_expires = Column(DateTime, nullable=True)
+
+    # Email verification
+    email_verified = Column(Boolean, default=False)
+    email_verification_token = Column(String, nullable=True)
+
+    # OAuth
+    oauth_provider = Column(String, nullable=True)  # google | github | None
+    oauth_id = Column(String, nullable=True)
 
     projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")

@@ -10,11 +10,10 @@ Supports:
 """
 
 import logging
+import math
 import time
 import gc
-import threading
 from typing import Optional
-from dataclasses import dataclass, field
 
 import torch
 from transformers import (
@@ -31,41 +30,120 @@ from transformers import (
 logger = logging.getLogger("meowllm.trainer")
 
 
-@dataclass
 class TrainingMetrics:
-    """Thread-safe shared state for real-time metrics."""
+    """
+    Shared training state.
 
-    status: str = "initializing"
-    current_step: int = 0
-    total_steps: int = 0
-    current_epoch: int = 0
-    total_epochs: int = 0
-    current_loss: Optional[float] = None
-    best_loss: Optional[float] = None
-    validation_loss: Optional[float] = None
-    learning_rate_current: Optional[float] = None
-    tokens_per_sec: float = 0.0
-    error_message: Optional[str] = None
-    log_history: list = field(default_factory=list)
+    Two modes of operation:
+      1. **Local** (no shared_dict): plain Python attrs, used inside tests or
+         when the caller doesn't need cross-process sharing.
+      2. **Shared** (shared_dict from multiprocessing.Manager): every read/write
+         transparently proxies through the Manager dict, so the API process
+         can read metrics that the child training process writes.
 
-    # Control flags (set by routes, read by callback)
-    pause_requested: bool = False
-    stop_requested: bool = False
+    pause_event / stop_event are multiprocessing.Event objects when running
+    in a subprocess, or simple flag booleans when running locally.
+    """
 
-    # Lock for thread-safe log_history access
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _FIELDS = (
+        "status", "current_step", "total_steps", "current_epoch",
+        "total_epochs", "current_loss", "best_loss", "validation_loss",
+        "perplexity", "learning_rate_current", "tokens_per_sec",
+        "error_message", "log_history",
+    )
+
+    def __init__(self, shared_dict=None, pause_event=None, stop_event=None):
+        self._shared = shared_dict  # None → local mode
+        self._pause_event = pause_event
+        self._stop_event = stop_event
+
+        # Local fallback storage (used when shared_dict is None)
+        if self._shared is None:
+            self._local = {
+                "status": "initializing",
+                "current_step": 0,
+                "total_steps": 0,
+                "current_epoch": 0,
+                "total_epochs": 0,
+                "current_loss": None,
+                "best_loss": None,
+                "validation_loss": None,
+                "perplexity": None,
+                "learning_rate_current": None,
+                "tokens_per_sec": 0.0,
+                "error_message": None,
+                "log_history": [],
+            }
+            self._pause_flag = False
+            self._stop_flag = False
+        else:
+            self._local = None
+            self._pause_flag = None
+            self._stop_flag = None
+
+    # ── Attribute access proxied to the correct backing store ──
+
+    def __getattr__(self, name: str):
+        if name.startswith("_") or name not in self._FIELDS:
+            raise AttributeError(name)
+        store = self._shared if self._shared is not None else self._local
+        return store.get(name)
+
+    def __setattr__(self, name: str, value):
+        if name.startswith("_") or name not in self._FIELDS:
+            super().__setattr__(name, value)
+            return
+        store = self._shared if self._shared is not None else self._local
+        store[name] = value
+
+    # ── Control flags via Events or plain bools ──
+
+    @property
+    def pause_requested(self) -> bool:
+        if self._pause_event is not None:
+            return self._pause_event.is_set()
+        return bool(self._pause_flag)
+
+    @pause_requested.setter
+    def pause_requested(self, value: bool):
+        if self._pause_event is not None:
+            self._pause_event.set() if value else self._pause_event.clear()
+        else:
+            self._pause_flag = value
+
+    @property
+    def stop_requested(self) -> bool:
+        if self._stop_event is not None:
+            return self._stop_event.is_set()
+        return bool(self._stop_flag)
+
+    @stop_requested.setter
+    def stop_requested(self, value: bool):
+        if self._stop_event is not None:
+            self._stop_event.set() if value else self._stop_event.clear()
+        else:
+            self._stop_flag = value
+
+    # ── Log history helpers ──
 
     def append_log(self, entry: dict):
-        """Thread-safe append to log_history with automatic pruning."""
-        with self._lock:
-            self.log_history.append(entry)
-            if len(self.log_history) > 10000:
-                self.log_history = self.log_history[-5000:]
+        """Append to log_history with automatic pruning."""
+        try:
+            history = self.log_history or []
+            history = list(history)  # defensive copy for proxy
+            history.append(entry)
+            if len(history) > 10000:
+                history = history[-5000:]
+            self.log_history = history
+        except Exception:
+            pass  # Don't crash training for a logging failure
 
     def get_log_history(self) -> list:
-        """Thread-safe copy of log_history."""
-        with self._lock:
-            return list(self.log_history)
+        """Return a copy of log_history."""
+        try:
+            return list(self.log_history or [])
+        except Exception:
+            return []
 
 
 class MeowTrainerCallback(TrainerCallback):
@@ -147,7 +225,23 @@ class MeowTrainerCallback(TrainerCallback):
             eval_loss = metrics.get("eval_loss")
             if eval_loss is not None:
                 self.metrics.validation_loss = round(eval_loss, 6)
-                logger.info("Validation loss: %.6f", eval_loss)
+                # Compute perplexity: exp(loss), capped to avoid overflow
+                try:
+                    ppl = math.exp(min(eval_loss, 100))
+                    self.metrics.perplexity = round(ppl, 2)
+                except OverflowError:
+                    self.metrics.perplexity = float('inf')
+                logger.info("Validation loss: %.6f  Perplexity: %.2f", eval_loss, self.metrics.perplexity)
+
+                # Add eval metrics to log history
+                eval_entry = {
+                    "step": state.global_step,
+                    "eval_loss": round(eval_loss, 6),
+                    "perplexity": self.metrics.perplexity,
+                    "epoch": metrics.get("epoch", 0),
+                    "timestamp": time.time(),
+                }
+                self.metrics.append_log(eval_entry)
 
     def on_save(self, args, state: TrainerState, control: TrainerControl, **kwargs):
         logger.info("Checkpoint saved at step %d", state.global_step)
@@ -205,8 +299,9 @@ def create_model_and_trainer(
     if training_method in ("lora", "qlora"):
         model = _apply_lora(model, hyperparameters)
 
-    # Enable gradient checkpointing for memory efficiency
-    if hasattr(model, "gradient_checkpointing_enable"):
+    # Enable gradient checkpointing if configured (saves ~40% VRAM)
+    use_gradient_checkpointing = hyperparameters.get("gradient_checkpointing", True)
+    if use_gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
@@ -219,6 +314,12 @@ def create_model_and_trainer(
     grad_accum = hyperparameters.get("gradient_accumulation_steps", 4)
     max_tokens = hyperparameters.get("max_tokens", 512)
     save_steps = hyperparameters.get("save_steps", 100)
+    weight_decay = hyperparameters.get("weight_decay", 0.01)
+    lr_scheduler_type = hyperparameters.get("lr_scheduler_type", "cosine")
+    eval_steps = hyperparameters.get("eval_steps", 50)
+    early_stopping_patience = hyperparameters.get("early_stopping_patience", 3)
+    early_stopping_threshold = hyperparameters.get("early_stopping_threshold", 0.01)
+    use_gradient_checkpointing = hyperparameters.get("gradient_checkpointing", True)
 
     # Calculate total steps for progress tracking
     if train_dataset is not None:
@@ -230,9 +331,9 @@ def create_model_and_trainer(
     metrics.total_steps = total_steps
     metrics.total_epochs = epochs
 
-    # Determine device
-    use_fp16 = torch.cuda.is_available() and training_method != "qlora"
+    # Auto-detect mixed precision (bf16 preferred on Ampere+, fp16 otherwise)
     use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported() and training_method != "qlora"
+    use_fp16 = torch.cuda.is_available() and not use_bf16 and training_method != "qlora"
 
     training_args = TrainingArguments(
         output_dir=output_dir,
@@ -242,27 +343,46 @@ def create_model_and_trainer(
         gradient_accumulation_steps=grad_accum,
         learning_rate=lr,
         warmup_steps=warmup_steps,
-        weight_decay=0.01,
+        weight_decay=weight_decay,
         logging_steps=1,  # Log every step for real-time updates
         save_steps=save_steps,
         save_total_limit=3,
         eval_strategy="steps" if eval_dataset is not None else "no",
-        eval_steps=save_steps if eval_dataset is not None else None,
+        eval_steps=eval_steps if eval_dataset is not None else None,
         load_best_model_at_end=eval_dataset is not None,
         metric_for_best_model="eval_loss" if eval_dataset is not None else None,
         greater_is_better=False,
-        fp16=use_fp16 and not use_bf16,
+        fp16=use_fp16,
         bf16=use_bf16,
         dataloader_pin_memory=torch.cuda.is_available(),
         remove_unused_columns=False,
         report_to="none",  # We handle our own reporting via callbacks
-        lr_scheduler_type="cosine",
+        lr_scheduler_type=lr_scheduler_type,
         optim="adamw_torch" if training_method != "qlora" else "paged_adamw_8bit",
         max_grad_norm=1.0,
         seed=42,
         dataloader_num_workers=0,  # Avoid multiprocessing issues in thread
         disable_tqdm=True,  # We have our own progress tracking
+        gradient_checkpointing=use_gradient_checkpointing,
     )
+
+    # ── DeepSpeed Multi-GPU ───────────────────────────────────────
+    if hyperparameters.get("multi_gpu", False):
+        try:
+            from app.ml.deepspeed_configs import get_deepspeed_config, get_gpu_count
+            gpu_count = get_gpu_count()
+            if gpu_count > 1:
+                ds_stage = hyperparameters.get("deepspeed_stage", 2)
+                ds_config = get_deepspeed_config(stage=ds_stage, gpu_count=gpu_count)
+                training_args.deepspeed = ds_config
+                logger.info(
+                    "DeepSpeed ZeRO-%d enabled for %d GPUs",
+                    ds_stage, gpu_count,
+                )
+            else:
+                logger.warning("multi_gpu requested but only %d GPU(s) detected", gpu_count)
+        except ImportError:
+            logger.warning("DeepSpeed not installed, multi-GPU disabled")
 
     # Store max_seq_length for tokens/sec calculation
     training_args._max_seq_length = max_tokens
@@ -273,8 +393,17 @@ def create_model_and_trainer(
         mlm=False,  # Causal LM, not masked LM
     )
 
-    # ── Callback ──────────────────────────────────────────────────
-    callback = MeowTrainerCallback(metrics, checkpoint_manager)
+    # ── Callbacks ─────────────────────────────────────────────────
+    callbacks = [MeowTrainerCallback(metrics, checkpoint_manager)]
+
+    # Early stopping (only if we have eval data and patience > 0)
+    if eval_dataset is not None and early_stopping_patience > 0:
+        from transformers import EarlyStoppingCallback as _ESCallback
+        callbacks.append(_ESCallback(
+            early_stopping_patience=early_stopping_patience,
+            early_stopping_threshold=early_stopping_threshold,
+        ))
+        logger.info("Early stopping enabled: patience=%d threshold=%.4f", early_stopping_patience, early_stopping_threshold)
 
     # ── Create Trainer ────────────────────────────────────────────
     trainer = Trainer(
@@ -284,14 +413,18 @@ def create_model_and_trainer(
         eval_dataset=eval_dataset,
         data_collator=data_collator,
         tokenizer=tokenizer,
-        callbacks=[callback],
+        callbacks=callbacks,
     )
 
     logger.info(
-        "Trainer created: %d train samples, %s eval samples, %d total steps",
+        "Trainer created: %d train samples, %s eval samples, %d total steps, "
+        "scheduler=%s, weight_decay=%.4f, gradient_checkpointing=%s",
         len(train_dataset) if train_dataset else 0,
         len(eval_dataset) if eval_dataset else "no",
         total_steps,
+        lr_scheduler_type,
+        weight_decay,
+        use_gradient_checkpointing,
     )
 
     return trainer

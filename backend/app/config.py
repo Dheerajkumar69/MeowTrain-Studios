@@ -38,7 +38,14 @@ _cors_raw = os.getenv("MEOWLLM_CORS_ORIGINS", "http://localhost:5173,http://loca
 CORS_ORIGINS = [origin.strip() for origin in _cors_raw.split(",") if origin.strip()]
 
 # ===== Upload Limits =====
-ALLOWED_EXTENSIONS = {".txt", ".json", ".csv", ".pdf", ".docx", ".md"}
+ALLOWED_EXTENSIONS = {
+    # Text
+    ".txt", ".md", ".json", ".jsonl", ".csv", ".tsv", ".pdf", ".docx",
+    # Structured
+    ".xlsx", ".xls", ".html", ".xml", ".yaml", ".yml", ".parquet",
+    # Images (OCR)
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp",
+}
 try:
     MAX_UPLOAD_SIZE_MB = int(os.getenv("MEOWLLM_MAX_UPLOAD_MB", "100"))
 except (ValueError, TypeError):
@@ -55,6 +62,35 @@ TRUST_REMOTE_CODE = os.getenv("MEOWLLM_TRUST_REMOTE_CODE", "false").lower() in (
 RATE_LIMIT_AUTH = os.getenv("MEOWLLM_RATE_LIMIT_AUTH", "5/minute")
 RATE_LIMIT_INFERENCE = os.getenv("MEOWLLM_RATE_LIMIT_INFERENCE", "10/minute")
 
+# ===== Role / Guest Limits =====
+GUEST_MAX_PROJECTS = int(os.getenv("MEOWLLM_GUEST_MAX_PROJECTS", "3"))
+GUEST_CLEANUP_DAYS = int(os.getenv("MEOWLLM_GUEST_CLEANUP_DAYS", "7"))
+
+# ===== Upload Rate Limit =====
+RATE_LIMIT_UPLOAD = os.getenv("MEOWLLM_RATE_LIMIT_UPLOAD", "10/minute")
+
+# ===== Logging =====
+LOG_LEVEL = os.getenv("MEOWLLM_LOG_LEVEL", "INFO").upper()
+LOG_FORMAT = os.getenv("MEOWLLM_LOG_FORMAT", "text")  # "text" or "json"
+
+# ===== Email (optional — for email verification & password reset) =====
+SMTP_HOST = os.getenv("MEOWLLM_SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("MEOWLLM_SMTP_PORT", "587"))
+SMTP_USER = os.getenv("MEOWLLM_SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("MEOWLLM_SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("MEOWLLM_SMTP_FROM", "noreply@meowtrain.local")
+SMTP_ENABLED = bool(SMTP_HOST and SMTP_USER)
+
+# ===== OAuth (optional) =====
+OAUTH_GOOGLE_CLIENT_ID = os.getenv("MEOWLLM_OAUTH_GOOGLE_CLIENT_ID", "")
+OAUTH_GOOGLE_CLIENT_SECRET = os.getenv("MEOWLLM_OAUTH_GOOGLE_CLIENT_SECRET", "")
+OAUTH_GITHUB_CLIENT_ID = os.getenv("MEOWLLM_OAUTH_GITHUB_CLIENT_ID", "")
+OAUTH_GITHUB_CLIENT_SECRET = os.getenv("MEOWLLM_OAUTH_GITHUB_CLIENT_SECRET", "")
+OAUTH_REDIRECT_BASE = os.getenv("MEOWLLM_OAUTH_REDIRECT_BASE", "http://localhost:5173")
+
+# ===== Frontend URL (for email links) =====
+FRONTEND_URL = os.getenv("MEOWLLM_FRONTEND_URL", "http://localhost:5173")
+
 # ===== Training Defaults =====
 DEFAULT_TRAINING_CONFIG = {
     "method": "lora",
@@ -68,10 +104,19 @@ DEFAULT_TRAINING_CONFIG = {
     "lora_dropout": 0.05,
     "warmup_steps": 10,
     "gradient_accumulation_steps": 4,
+    # Best-practice additions
+    "weight_decay": 0.01,
+    "lr_scheduler_type": "cosine",
+    "early_stopping_patience": 3,
+    "early_stopping_threshold": 0.01,
+    "gradient_checkpointing": True,
+    "fp16": False,   # auto-detect at runtime
+    "bf16": False,   # auto-detect at runtime
+    "eval_steps": 50,
 }
 
-# ===== Supported Models =====
-SUPPORTED_MODELS = [
+# ===== Model Catalog (recommendations — any HuggingFace model can be used) =====
+MODEL_CATALOG = [
     {
         "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         "name": "TinyLlama 1.1B Chat",

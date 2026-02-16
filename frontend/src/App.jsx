@@ -6,6 +6,9 @@ import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import DashboardPage from './pages/DashboardPage';
 import ProjectPage from './pages/ProjectPage';
+import VerifyEmailPage from './pages/VerifyEmailPage';
+import ResetPasswordPage from './pages/ResetPasswordPage';
+import OAuthCallbackPage from './pages/OAuthCallbackPage';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -30,6 +33,10 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={<PublicRoute><ErrorBoundary><LoginPage /></ErrorBoundary></PublicRoute>} />
       <Route path="/register" element={<PublicRoute><ErrorBoundary><RegisterPage /></ErrorBoundary></PublicRoute>} />
+      <Route path="/verify-email" element={<ErrorBoundary><VerifyEmailPage /></ErrorBoundary>} />
+      <Route path="/reset-password" element={<ErrorBoundary><ResetPasswordPage /></ErrorBoundary>} />
+      <Route path="/forgot-password" element={<ErrorBoundary><ResetPasswordPage /></ErrorBoundary>} />
+      <Route path="/oauth/callback" element={<ErrorBoundary><OAuthCallbackPage /></ErrorBoundary>} />
       <Route path="/" element={<ProtectedRoute><ErrorBoundary><DashboardPage /></ErrorBoundary></ProtectedRoute>} />
       <Route path="/project/:id" element={<ProtectedRoute><ErrorBoundary><ProjectPage /></ErrorBoundary></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/" />} />

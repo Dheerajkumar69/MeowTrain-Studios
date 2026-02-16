@@ -8,7 +8,7 @@ class PromptTemplate(Base):
     __tablename__ = "prompt_templates"
 
     id = Column(Integer, primary_key=True, index=True)
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String, nullable=False)
     system_prompt = Column(Text, default="")
     user_prompt = Column(Text, default="")

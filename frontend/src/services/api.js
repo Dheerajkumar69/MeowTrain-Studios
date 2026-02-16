@@ -66,10 +66,6 @@ api.interceptors.response.use(
             }
         }
 
-        // Non-recoverable 401 on auth endpoints — just clear
-        if (error.response?.status === 401 && !isAuthEndpoint) {
-            localStorage.removeItem('meowllm_token');
-        }
         return Promise.reject(error);
     }
 );
@@ -83,6 +79,11 @@ export const authAPI = {
     updateProfile: (data) => api.patch('/auth/profile', data),
     changePassword: (data) => api.post('/auth/password', data),
     refresh: () => api.post('/auth/refresh'),
+    verifyEmail: (token) => api.post('/auth/verify-email', { token }),
+    resendVerification: (email) => api.post('/auth/resend-verification', { email }),
+    forgotPassword: (email) => api.post('/auth/forgot-password', { email }),
+    resetPassword: (token, new_password) => api.post('/auth/reset-password', { token, new_password }),
+    deleteAccount: () => api.delete('/auth/account'),
 };
 
 // ===== Projects =====
@@ -105,6 +106,14 @@ export const datasetsAPI = {
         api.get(`/projects/${projectId}/datasets/${datasetId}/preview`),
     delete: (projectId, datasetId) =>
         api.delete(`/projects/${projectId}/datasets/${datasetId}`),
+    previewTraining: (projectId, config = {}) =>
+        api.post(`/projects/${projectId}/datasets/preview-training`, null, {
+            params: { base_model: config.base_model, max_tokens: config.max_tokens },
+        }),
+    augmentPreview: (projectId, options = {}) =>
+        api.post(`/projects/${projectId}/datasets/augment`, { ...options, preview_only: true }),
+    augment: (projectId, options = {}) =>
+        api.post(`/projects/${projectId}/datasets/augment`, { ...options, preview_only: false }),
 };
 
 // ===== Models =====
@@ -113,7 +122,15 @@ export const modelsAPI = {
     status: (modelId) => api.get(`/models/${encodeURIComponent(modelId)}/status`),
     download: (modelId) => api.post(`/models/${encodeURIComponent(modelId)}/download`),
     cancelDownload: (modelId) => api.delete(`/models/${encodeURIComponent(modelId)}/download`),
-    exportModel: (projectId) => api.get(`/models/export/${projectId}`, { responseType: 'blob' }),
+    exportModel: (projectId) => api.get(`/models/export/${projectId}`, { responseType: 'blob', timeout: 300000 }),
+    // Custom model lookup
+    lookupCustom: (modelId) => api.post('/models/custom/lookup', null, { params: { model_id: modelId } }),
+    // GGUF export for LM Studio
+    exportGGUF: (projectId, quantization = 'Q8_0') =>
+        api.post(`/models/export/${projectId}/gguf`, null, { params: { quantization } }),
+    ggufStatus: (projectId) => api.get(`/models/export/${projectId}/gguf/status`),
+    ggufDownload: (projectId) =>
+        api.get(`/models/export/${projectId}/gguf/download`, { responseType: 'blob', timeout: 600000 }),
 };
 
 // ===== Training =====
@@ -127,11 +144,98 @@ export const trainingAPI = {
     status: (projectId) => api.get(`/projects/${projectId}/train/status`),
     history: (projectId, params = {}) =>
         api.get(`/projects/${projectId}/train/history`, { params }),
+    compareRuns: (projectId, runIds) =>
+        api.get(`/projects/${projectId}/train/compare`, { params: { run_ids: runIds.join(',') } }),
 };
 
 // ===== Inference =====
 export const inferenceAPI = {
     chat: (projectId, data) => api.post(`/projects/${projectId}/chat`, data),
+    /**
+     * SSE streaming chat — returns an EventSource-like interface.
+     * Calls the /chat/stream endpoint and yields partial tokens via callbacks.
+     *
+     * @param {number|string} projectId
+     * @param {object} data - { prompt, system_prompt, temperature, max_tokens, ... }
+     * @param {object} callbacks - { onToken(text), onDone(), onError(err) }
+     * @returns {{ abort: () => void }} - controller to cancel the stream
+     */
+    chatStream: (projectId, data, { onToken, onDone, onError }) => {
+        const abortController = new AbortController();
+        const token = localStorage.getItem('meowllm_token');
+
+        fetch(`/api/projects/${projectId}/chat/stream`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify(data),
+            signal: abortController.signal,
+        })
+            .then(async (response) => {
+                if (!response.ok) {
+                    const errBody = await response.json().catch(() => ({}));
+                    throw new Error(errBody.detail || `HTTP ${response.status}`);
+                }
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let doneFired = false;
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+
+                    // Parse SSE lines from buffer
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || ''; // keep incomplete line in buffer
+
+                    let currentEvent = '';
+                    for (const line of lines) {
+                        if (line.startsWith('event:')) {
+                            currentEvent = line.slice(6).trim();
+                        } else if (line.startsWith('data:')) {
+                            const dataStr = line.slice(5).trim();
+                            if (!dataStr) continue;
+                            try {
+                                const parsed = JSON.parse(dataStr);
+                                if (currentEvent === 'token' && parsed.text != null) {
+                                    onToken(parsed.text);
+                                } else if (currentEvent === 'done') {
+                                    if (!doneFired) { doneFired = true; onDone?.(); }
+                                } else if (currentEvent === 'error') {
+                                    onError?.(new Error(parsed.detail || 'Stream error'));
+                                }
+                            } catch {
+                                // ignore malformed JSON chunks
+                            }
+                            currentEvent = '';
+                        }
+                    }
+                }
+
+                // Flush remaining buffer
+                if (buffer.trim()) {
+                    const remaining = buffer.trim();
+                    if (remaining.startsWith('data:')) {
+                        try {
+                            const parsed = JSON.parse(remaining.slice(5).trim());
+                            if (parsed.text != null) onToken(parsed.text);
+                        } catch { /* ignore */ }
+                    }
+                }
+
+                if (!doneFired) { doneFired = true; onDone?.(); }
+            })
+            .catch((err) => {
+                if (err.name === 'AbortError') return; // intentional cancel
+                onError?.(err);
+            });
+
+        return { abort: () => abortController.abort() };
+    },
     getContext: (projectId) => api.get(`/projects/${projectId}/chat/context`),
     savePrompt: (projectId, data) => api.post(`/projects/${projectId}/prompts`, data),
     listPrompts: (projectId) => api.get(`/projects/${projectId}/prompts`),
@@ -148,6 +252,33 @@ export const lmstudioAPI = {
     setConfig: (data) => api.put('/lmstudio/config', data),
     testConnection: () => api.post('/lmstudio/test'),
     listModels: () => api.get('/lmstudio/models'),
+};
+
+// ===== Admin =====
+export const adminAPI = {
+    listUsers: (params = {}) => api.get('/admin/users', { params }),
+    deleteUser: (userId) => api.delete(`/admin/users/${userId}`),
+    updateUserRole: (userId, role) => api.patch(`/admin/users/${userId}`, null, { params: { role } }),
+    stats: () => api.get('/admin/stats'),
+    listCache: () => api.get('/admin/cache'),
+    evictCache: (modelName) => api.delete(`/admin/cache/${encodeURIComponent(modelName)}`),
+};
+
+// ===== Backup =====
+export const backupAPI = {
+    export: (projectId) =>
+        api.get(`/projects/${projectId}/backup`, { responseType: 'blob', timeout: 300000 }),
+    import: (formData) =>
+        api.post('/projects/import', formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+            timeout: 300000,
+        }),
+};
+
+// ===== Lineage =====
+export const lineageAPI = {
+    getProjectLineage: (projectId) => api.get(`/projects/${projectId}/lineage`),
+    getRunLineage: (projectId, runId) => api.get(`/projects/${projectId}/lineage/runs/${runId}`),
 };
 
 export default api;

@@ -8,7 +8,7 @@ class ModelConfig(Base):
     __tablename__ = "model_configs"
 
     id = Column(Integer, primary_key=True, index=True)
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     base_model = Column(String, nullable=False)
     training_method = Column(String, default="lora")  # lora, qlora, full
     hyperparameters = Column(JSON, default=dict)

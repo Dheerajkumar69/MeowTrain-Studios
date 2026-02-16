@@ -74,6 +74,43 @@ class CheckpointManager:
         """Get the final model output path."""
         return self.output_dir
 
+    def get_latest_checkpoint(self) -> Optional[str]:
+        """
+        Find the latest valid checkpoint in the checkpoint directory.
+
+        Scans for directories matching 'checkpoint-{step}' pattern and
+        returns the path to the one with the highest step number.
+
+        Returns:
+            Path string to the latest checkpoint, or None if no checkpoints exist.
+        """
+        if not self.checkpoint_dir.exists():
+            return None
+
+        checkpoint_dirs = []
+        for d in self.checkpoint_dir.iterdir():
+            if d.is_dir() and d.name.startswith("checkpoint-"):
+                try:
+                    step = int(d.name.split("-", 1)[1])
+                    # Verify it has at least some model files
+                    has_files = any(d.iterdir())
+                    if has_files:
+                        checkpoint_dirs.append((step, d))
+                except (ValueError, StopIteration):
+                    continue
+
+        if not checkpoint_dirs:
+            return None
+
+        # Sort by step number, return the highest
+        checkpoint_dirs.sort(key=lambda x: x[0], reverse=True)
+        latest = checkpoint_dirs[0]
+        logger.info(
+            "Found latest checkpoint at step %d: %s",
+            latest[0], latest[1],
+        )
+        return str(latest[1])
+
     def save_checkpoint(
         self,
         trainer,
@@ -181,10 +218,11 @@ class CheckpointManager:
             from transformers import AutoModelForCausalLM
 
             logger.info("Loading base model %s for LoRA merge...", base_model_name)
+            from app.config import TRUST_REMOTE_CODE
             base_model = AutoModelForCausalLM.from_pretrained(
                 base_model_name,
                 torch_dtype="auto",
-                trust_remote_code=True,
+                trust_remote_code=TRUST_REMOTE_CODE,
                 low_cpu_mem_usage=True,
             )
 

@@ -19,6 +19,7 @@ WORKDIR /app
 # Runtime system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
+    tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed packages from builder

@@ -1,37 +1,35 @@
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from sqlalchemy.orm import Session
 from typing import Optional
 import time
+
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app.database import get_db
 from app.models.project import Project
 from app.models.training_run import TrainingRun
 from app.models.prompt_template import PromptTemplate
-from app.schemas import ChatRequest, ChatResponse, PromptTemplateCreate, PromptTemplateResponse
+from app.schemas import ChatRequest, ChatResponse, PromptTemplateCreate, PromptTemplateUpdate, PromptTemplateResponse, InferenceContextResponse, PaginatedPromptsResponse, DetailResponse
 from app.services.auth_service import get_user_from_header
+from app.config import RATE_LIMIT_INFERENCE
+from app.dependencies import get_project_for_user
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["Inference"])
 
-
-def _get_project(project_id: int, authorization: Optional[str], db: Session):
-    try:
-        user = get_user_from_header(db, authorization)
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e))
-    project = db.query(Project).filter(Project.id == project_id, Project.user_id == user.id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return project
+_limiter = Limiter(key_func=get_remote_address)
 
 
 @router.post("/chat", response_model=ChatResponse)
+@_limiter.limit(RATE_LIMIT_INFERENCE)
 def chat(
+    request: Request,
     project_id: int,
     req: ChatRequest,
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
-    project = _get_project(project_id, authorization, db)
+    project = get_project_for_user(project_id, authorization, db)
 
     start_time = time.time()
 
@@ -101,13 +99,50 @@ def chat(
         raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
 
 
-@router.get("/chat/context")
+@router.post("/chat/stream")
+@_limiter.limit(RATE_LIMIT_INFERENCE)
+async def chat_stream(
+    request: Request,
+    project_id: int,
+    req: ChatRequest,
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    """SSE streaming endpoint — yields partial text tokens as they are generated."""
+    project = get_project_for_user(project_id, authorization, db)
+
+    from app.utils.lazy_imports import sse_starlette
+    EventSourceResponse = sse_starlette().sse.EventSourceResponse
+    import json as _json
+
+    def event_generator():
+        try:
+            from app.services.inference_service import generate_response_stream
+
+            for chunk in generate_response_stream(
+                project_id=project.id,
+                prompt=req.prompt,
+                system_prompt=req.system_prompt,
+                temperature=req.temperature,
+                max_tokens=req.max_tokens,
+            ):
+                yield {"event": "token", "data": _json.dumps({"text": chunk})}
+            yield {"event": "done", "data": _json.dumps({"status": "complete"})}
+        except RuntimeError as e:
+            yield {"event": "error", "data": _json.dumps({"detail": str(e)})}
+        except Exception as e:
+            yield {"event": "error", "data": _json.dumps({"detail": f"Inference error: {e}"})}
+
+    return EventSourceResponse(event_generator())
+
+
+@router.get("/chat/context", response_model=InferenceContextResponse)
 def get_context(
     project_id: int,
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
-    project = _get_project(project_id, authorization, db)
+    project = get_project_for_user(project_id, authorization, db)
     from app.models.dataset import Dataset
     datasets = db.query(Dataset).filter(Dataset.project_id == project.id, Dataset.status == "ready").all()
 
@@ -135,7 +170,7 @@ def save_prompt(
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
-    project = _get_project(project_id, authorization, db)
+    project = get_project_for_user(project_id, authorization, db)
     template = PromptTemplate(
         project_id=project.id,
         name=req.name,
@@ -149,12 +184,74 @@ def save_prompt(
     return PromptTemplateResponse.model_validate(template)
 
 
-@router.get("/prompts", response_model=list[PromptTemplateResponse])
+@router.get("/prompts", response_model=PaginatedPromptsResponse)
 def list_prompts(
     project_id: int,
+    page: int = 1,
+    per_page: int = 50,
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
-    project = _get_project(project_id, authorization, db)
-    templates = db.query(PromptTemplate).filter(PromptTemplate.project_id == project.id).all()
-    return [PromptTemplateResponse.model_validate(t) for t in templates]
+    project = get_project_for_user(project_id, authorization, db)
+    per_page = min(max(per_page, 1), 200)
+    page = max(page, 1)
+    offset = (page - 1) * per_page
+
+    query = db.query(PromptTemplate).filter(PromptTemplate.project_id == project.id)
+    total = query.count()
+    templates = (
+        query
+        .order_by(PromptTemplate.created_at.desc())
+        .offset(offset)
+        .limit(per_page)
+        .all()
+    )
+    return {
+        "items": [PromptTemplateResponse.model_validate(t) for t in templates],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+    }
+
+
+@router.put("/prompts/{template_id}", response_model=PromptTemplateResponse)
+def update_prompt(
+    project_id: int,
+    template_id: int,
+    req: PromptTemplateUpdate,
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    project = get_project_for_user(project_id, authorization, db)
+    template = db.query(PromptTemplate).filter(
+        PromptTemplate.id == template_id, PromptTemplate.project_id == project.id
+    ).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Prompt template not found")
+
+    update_data = req.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(template, key, value)
+
+    db.commit()
+    db.refresh(template)
+    return PromptTemplateResponse.model_validate(template)
+
+
+@router.delete("/prompts/{template_id}", response_model=DetailResponse)
+def delete_prompt(
+    project_id: int,
+    template_id: int,
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    project = get_project_for_user(project_id, authorization, db)
+    template = db.query(PromptTemplate).filter(
+        PromptTemplate.id == template_id, PromptTemplate.project_id == project.id
+    ).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Prompt template not found")
+
+    db.delete(template)
+    db.commit()
+    return {"detail": "Prompt template deleted"}

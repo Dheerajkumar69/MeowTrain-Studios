@@ -4,13 +4,17 @@ import {
     Upload, FileText, File, Trash2, Eye, X,
     Hash, Layers, CheckCircle, AlertCircle, Loader
 } from 'lucide-react';
+import { useToast } from '../Toast';
+import ConfirmDialog from '../ConfirmDialog';
 
 export default function DatasetPanel({ projectId, datasets, setDatasets }) {
     const [uploading, setUploading] = useState(false);
     const [dragOver, setDragOver] = useState(false);
     const [preview, setPreview] = useState(null);
     const [previewLoading, setPreviewLoading] = useState(false);
+    const [deleteTarget, setDeleteTarget] = useState(null);
     const fileInputRef = useRef(null);
+    const toast = useToast();
 
     const handleFiles = async (files) => {
         setUploading(true);
@@ -21,7 +25,7 @@ export default function DatasetPanel({ projectId, datasets, setDatasets }) {
                 const res = await datasetsAPI.upload(projectId, formData);
                 setDatasets((prev) => [res.data, ...prev]);
             } catch (err) {
-                alert(`Failed to upload ${file.name}: ${err.response?.data?.detail || err.message}`);
+                toast.error(`Failed to upload ${file.name}: ${err.response?.data?.detail || err.message}`);
             }
         }
         setUploading(false);
@@ -39,20 +43,24 @@ export default function DatasetPanel({ projectId, datasets, setDatasets }) {
             const res = await datasetsAPI.preview(projectId, dataset.id);
             setPreview(res.data);
         } catch (err) {
-            alert('Failed to load preview');
+            toast.error('Failed to load preview');
         } finally {
             setPreviewLoading(false);
         }
     };
 
     const handleDelete = async (datasetId) => {
-        if (!confirm('Delete this dataset?')) return;
+        // Optimistic: remove from list immediately
+        const previousDatasets = datasets;
+        setDatasets((prev) => prev.filter((d) => d.id !== datasetId));
+        if (preview?.id === datasetId) setPreview(null);
+        setDeleteTarget(null);
         try {
             await datasetsAPI.delete(projectId, datasetId);
-            setDatasets((prev) => prev.filter((d) => d.id !== datasetId));
-            if (preview?.id === datasetId) setPreview(null);
         } catch (err) {
-            alert('Failed to delete');
+            // Rollback on failure
+            setDatasets(previousDatasets);
+            toast.error('Failed to delete dataset');
         }
     };
 
@@ -69,7 +77,7 @@ export default function DatasetPanel({ projectId, datasets, setDatasets }) {
             {/* Header */}
             <div>
                 <h2 className="text-xl font-bold text-surface-900">Training Data</h2>
-                <p className="text-sm text-surface-500 mt-1">Upload files to teach your model. Supported: .txt, .pdf, .md, .csv, .json, .docx</p>
+                <p className="text-sm text-surface-500 mt-1">Upload files to teach your model. Supported: text, PDF, Word, Excel, CSV, JSON, HTML, images (OCR), and more</p>
             </div>
 
             {/* Drop Zone */}
@@ -78,7 +86,11 @@ export default function DatasetPanel({ projectId, datasets, setDatasets }) {
                 onDragLeave={() => setDragOver(false)}
                 onDrop={handleDrop}
                 onClick={() => fileInputRef.current?.click()}
-                className={`border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-all ${dragOver
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInputRef.current?.click(); } }}
+                role="button"
+                tabIndex={0}
+                aria-label="Upload training files. Drop files here or press Enter to browse."
+                className={`border-2 border-dashed rounded-2xl p-6 sm:p-10 text-center cursor-pointer transition-all focus:outline-none focus:ring-2 focus:ring-primary-500/50 ${dragOver
                     ? 'border-primary-400 bg-primary-50'
                     : 'border-surface-200 hover:border-primary-300 hover:bg-surface-50'
                     }`}
@@ -87,7 +99,7 @@ export default function DatasetPanel({ projectId, datasets, setDatasets }) {
                     ref={fileInputRef}
                     type="file"
                     multiple
-                    accept=".txt,.pdf,.md,.csv,.json,.docx"
+                    accept=".txt,.pdf,.md,.csv,.tsv,.json,.jsonl,.docx,.xlsx,.xls,.html,.htm,.xml,.yaml,.yml,.parquet,.png,.jpg,.jpeg,.gif,.bmp,.tiff,.webp"
                     onChange={(e) => handleFiles(Array.from(e.target.files))}
                     className="hidden"
                 />
@@ -103,7 +115,7 @@ export default function DatasetPanel({ projectId, datasets, setDatasets }) {
                         </div>
                         <div>
                             <p className="text-sm font-medium text-surface-700">Drop files here or click to browse</p>
-                            <p className="text-xs text-surface-400 mt-1">Text, PDF, Markdown, CSV, JSON, Word documents</p>
+                            <p className="text-xs text-surface-400 mt-1">Text, PDF, Word, Excel, CSV, JSON, HTML, YAML, Parquet, Images</p>
                         </div>
                     </div>
                 )}
@@ -111,7 +123,7 @@ export default function DatasetPanel({ projectId, datasets, setDatasets }) {
 
             {/* Stats */}
             {datasets.length > 0 && (
-                <div className="grid grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     <div className="bg-white rounded-xl border border-surface-100 p-4 text-center">
                         <p className="text-2xl font-bold text-surface-900">{datasets.length}</p>
                         <p className="text-xs text-surface-500 mt-1">Files</p>
@@ -150,20 +162,20 @@ export default function DatasetPanel({ projectId, datasets, setDatasets }) {
                                         {formatSize(ds.file_size || 0)} • {(ds.token_count || 0).toLocaleString()} tokens • {ds.chunk_count || 0} chunks
                                     </p>
                                 </div>
-                                <div className="flex items-center gap-1">
+                                <div className="flex items-center gap-1" role="group" aria-label="Dataset actions">
                                     <button
                                         onClick={() => handlePreview(ds)}
-                                        className="p-1.5 text-surface-400 hover:text-primary-500 transition-colors rounded-lg hover:bg-primary-50"
-                                        title="Preview"
+                                        className="p-1.5 text-surface-400 hover:text-primary-500 transition-colors rounded-lg hover:bg-primary-50 focus:outline-none focus:ring-2 focus:ring-primary-500/50"
+                                        aria-label={`Preview ${ds.original_name}`}
                                     >
-                                        <Eye className="w-4 h-4" />
+                                        <Eye className="w-4 h-4" aria-hidden="true" />
                                     </button>
                                     <button
-                                        onClick={() => handleDelete(ds.id)}
-                                        className="p-1.5 text-surface-400 hover:text-danger-500 transition-colors rounded-lg hover:bg-danger-400/10"
-                                        title="Delete"
+                                        onClick={() => setDeleteTarget(ds.id)}
+                                        className="p-1.5 text-surface-400 hover:text-danger-500 transition-colors rounded-lg hover:bg-danger-400/10 focus:outline-none focus:ring-2 focus:ring-danger-500/50"
+                                        aria-label={`Delete ${ds.original_name}`}
                                     >
-                                        <Trash2 className="w-4 h-4" />
+                                        <Trash2 className="w-4 h-4" aria-hidden="true" />
                                     </button>
                                 </div>
                             </div>
@@ -209,6 +221,17 @@ export default function DatasetPanel({ projectId, datasets, setDatasets }) {
                     </div>
                 </div>
             )}
+
+            {/* Delete Confirmation Dialog */}
+            <ConfirmDialog
+                open={!!deleteTarget}
+                title="Delete Dataset"
+                message="Are you sure you want to delete this dataset? This action cannot be undone."
+                confirmLabel="Delete"
+                variant="danger"
+                onConfirm={() => handleDelete(deleteTarget)}
+                onCancel={() => setDeleteTarget(null)}
+            />
         </div>
     );
 }

@@ -8,9 +8,9 @@ class TrainingRun(Base):
     __tablename__ = "training_runs"
 
     id = Column(Integer, primary_key=True, index=True)
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
-    model_config_id = Column(Integer, ForeignKey("model_configs.id"), nullable=False)
-    status = Column(String, default="pending")  # pending, running, paused, completed, stopped, error
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    model_config_id = Column(Integer, ForeignKey("model_configs.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String, default="pending", index=True)  # pending, running, paused, completed, stopped, error
     current_loss = Column(Float, nullable=True)
     best_loss = Column(Float, nullable=True)
     current_epoch = Column(Integer, default=0)
@@ -23,6 +23,7 @@ class TrainingRun(Base):
     error_message = Column(String, nullable=True)
     learning_rate_current = Column(Float, nullable=True)
     validation_loss = Column(Float, nullable=True)
+    perplexity = Column(Float, nullable=True)
     log_history = Column(JSON, nullable=True)
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)

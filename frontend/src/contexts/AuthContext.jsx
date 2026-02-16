@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { authAPI } from '../services/api';
 
 const AuthContext = createContext(null);
@@ -25,34 +25,49 @@ export function AuthProvider({ children }) {
         }
     }, []);
 
-    const login = async (email, password) => {
+    const login = useCallback(async (email, password) => {
         const res = await authAPI.login({ email, password });
         localStorage.setItem('meowllm_token', res.data.token);
         setUser(res.data.user);
         return res.data;
-    };
+    }, []);
 
-    const register = async (email, password, displayName) => {
+    const register = useCallback(async (email, password, displayName) => {
         const res = await authAPI.register({ email, password, display_name: displayName });
         localStorage.setItem('meowllm_token', res.data.token);
         setUser(res.data.user);
         return res.data;
-    };
+    }, []);
 
-    const guestLogin = async () => {
+    const guestLogin = useCallback(async () => {
         const res = await authAPI.guest();
         localStorage.setItem('meowllm_token', res.data.token);
         setUser(res.data.user);
         return res.data;
-    };
+    }, []);
 
-    const logout = () => {
+    const logout = useCallback(() => {
         localStorage.removeItem('meowllm_token');
         setUser(null);
-    };
+    }, []);
+
+    /** Update user state in-place after profile edits (avoids full refetch). */
+    const updateUser = useCallback((updates) => {
+        setUser((prev) => (prev ? { ...prev, ...updates } : prev));
+    }, []);
+
+    /** Re-fetch user from server (e.g. after token refresh). */
+    const refreshUser = useCallback(async () => {
+        try {
+            const res = await authAPI.me();
+            setUser(res.data);
+        } catch {
+            // silent — caller handles error
+        }
+    }, []);
 
     return (
-        <AuthContext.Provider value={{ user, loading, login, register, guestLogin, logout }}>
+        <AuthContext.Provider value={{ user, loading, login, register, guestLogin, logout, updateUser, refreshUser }}>
             {children}
         </AuthContext.Provider>
     );

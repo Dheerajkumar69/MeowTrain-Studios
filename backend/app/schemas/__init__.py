@@ -9,13 +9,21 @@ VALID_PROJECT_STATUSES = {"created", "training", "trained", "error"}
 # ===== Auth Schemas =====
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str = Field(..., min_length=6)
-    display_name: str = Field(default="User", max_length=100)
+    password: str = Field(..., min_length=8, max_length=128)
+    display_name: str = Field(default="User", min_length=1, max_length=100)
+
+    @field_validator("display_name")
+    @classmethod
+    def sanitize_display_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            return "User"
+        return v
 
 
 class LoginRequest(BaseModel):
-    email: str
-    password: str
+    email: str = Field(..., min_length=3, max_length=320)
+    password: str = Field(..., min_length=1, max_length=128)
 
 
 class AuthResponse(BaseModel):
@@ -30,6 +38,8 @@ class UserResponse(BaseModel):
     email: Optional[str] = None
     display_name: str
     is_guest: bool
+    role: str = "member"
+    email_verified: bool = False
     created_at: datetime
 
 
@@ -52,7 +62,8 @@ class ProjectUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     description: Optional[str] = Field(default=None, max_length=500)
     intended_use: Optional[str] = None
-    status: Optional[Literal["created", "training", "trained", "error"]] = None
+    # NOTE: 'status' intentionally excluded — project status is managed
+    # internally by the training pipeline, not by client requests.
 
     @field_validator("name")
     @classmethod
@@ -122,8 +133,8 @@ class ModelInfo(BaseModel):
 
 # ===== Training Schemas =====
 class TrainingConfigRequest(BaseModel):
-    base_model: str
-    method: Literal["lora", "qlora", "full"] = Field(default="lora")
+    base_model: str = Field(..., min_length=3, max_length=200)
+    method: Literal["lora", "qlora", "full", "dpo", "orpo"] = Field(default="lora")
     epochs: int = Field(default=3, ge=1, le=50)
     batch_size: int = Field(default=4, ge=1, le=64)
     learning_rate: float = Field(default=2e-4, gt=0, le=1.0)
@@ -134,6 +145,21 @@ class TrainingConfigRequest(BaseModel):
     lora_dropout: float = Field(default=0.05, ge=0.0, le=0.5)
     warmup_steps: int = Field(default=10, ge=0, le=1000)
     gradient_accumulation_steps: int = Field(default=4, ge=1, le=32)
+    # Best-practice additions
+    weight_decay: float = Field(default=0.01, ge=0.0, le=1.0)
+    lr_scheduler_type: Literal["cosine", "linear", "constant", "cosine_with_restarts"] = Field(default="cosine")
+    early_stopping_patience: int = Field(default=3, ge=0, le=20)
+    early_stopping_threshold: float = Field(default=0.01, ge=0.0, le=1.0)
+    gradient_checkpointing: bool = Field(default=True)
+    eval_steps: int = Field(default=50, ge=10, le=1000)
+    # Alignment training (DPO/ORPO)
+    dpo_beta: float = Field(default=0.1, ge=0.01, le=1.0, description="DPO KL penalty coefficient")
+    orpo_alpha: float = Field(default=1.0, ge=0.1, le=10.0, description="ORPO odds ratio weight")
+    # Multi-GPU / DeepSpeed
+    multi_gpu: bool = Field(default=False, description="Enable multi-GPU via DeepSpeed")
+    deepspeed_stage: Literal[2, 3] = Field(default=2, description="DeepSpeed ZeRO stage")
+    # Resume from checkpoint
+    resume_from_checkpoint: bool = Field(default=False, description="Resume training from latest checkpoint")
 
 
 class TrainingStatusResponse(BaseModel):
@@ -144,6 +170,7 @@ class TrainingStatusResponse(BaseModel):
     current_loss: Optional[float] = None
     best_loss: Optional[float] = None
     validation_loss: Optional[float] = None
+    perplexity: Optional[float] = None
     learning_rate_current: Optional[float] = None
     current_epoch: int
     total_epochs: int
@@ -159,6 +186,8 @@ class TrainingStatusResponse(BaseModel):
 class TrainingLogEntry(BaseModel):
     step: int
     loss: Optional[float] = None
+    eval_loss: Optional[float] = None
+    perplexity: Optional[float] = None
     learning_rate: Optional[float] = None
     epoch: Optional[float] = None
     timestamp: Optional[float] = None
@@ -167,11 +196,11 @@ class TrainingLogEntry(BaseModel):
 # ===== Inference Schemas =====
 class ChatRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=50000)
-    system_prompt: str = Field(default="You are a helpful assistant.")
+    system_prompt: str = Field(default="You are a helpful assistant.", max_length=10000)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=512, ge=1, le=4096)
-    context_dataset_ids: list[int] = Field(default_factory=list)
-    lmstudio_model: Optional[str] = Field(default=None, description="LM Studio model ID to use for inference")
+    context_dataset_ids: list[int] = Field(default_factory=list, max_length=50)
+    lmstudio_model: Optional[str] = Field(default=None, max_length=500, description="LM Studio model ID to use for inference")
 
 
 class ChatResponse(BaseModel):
@@ -183,9 +212,33 @@ class ChatResponse(BaseModel):
 
 class PromptTemplateCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
-    system_prompt: str = Field(default="")
-    user_prompt: str = Field(default="")
+    system_prompt: str = Field(default="", max_length=10000)
+    user_prompt: str = Field(default="", max_length=50000)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+
+    @field_validator("name")
+    @classmethod
+    def trim_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Template name cannot be blank")
+        return v
+
+
+class PromptTemplateUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    system_prompt: Optional[str] = Field(default=None, max_length=10000)
+    user_prompt: Optional[str] = Field(default=None, max_length=50000)
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+
+    @field_validator("name")
+    @classmethod
+    def trim_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            v = v.strip()
+            if not v:
+                raise ValueError("Template name cannot be blank")
+        return v
 
 
 class PromptTemplateResponse(BaseModel):
@@ -240,5 +293,287 @@ class ProfileUpdateRequest(BaseModel):
 
 
 class PasswordChangeRequest(BaseModel):
-    current_password: str = Field(..., min_length=1)
-    new_password: str = Field(..., min_length=6)
+    current_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+# ===== Generic Responses =====
+class DetailResponse(BaseModel):
+    detail: str
+
+
+class DetailWithIdResponse(BaseModel):
+    detail: str
+    run_id: Optional[int] = None
+
+
+# ===== Paginated Responses =====
+class PaginatedProjectsResponse(BaseModel):
+    items: list[ProjectResponse]
+    total: int
+    page: int
+    per_page: int
+
+
+class PaginatedDatasetsResponse(BaseModel):
+    items: list[DatasetResponse]
+    total: int
+    page: int
+    per_page: int
+
+
+class PaginatedPromptsResponse(BaseModel):
+    items: list[PromptTemplateResponse]
+    total: int
+    page: int
+    per_page: int
+
+
+# ===== Password Reset =====
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(..., min_length=1, max_length=512)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+# ===== Training History & Compare =====
+class TrainingHistoryResponse(BaseModel):
+    runs: list[TrainingStatusResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class ConfigDiffEntry(BaseModel):
+    key: str
+    run_a: Optional[object] = None
+    run_b: Optional[object] = None
+    different: bool
+
+
+class RunComparison(BaseModel):
+    run_id: int
+    status: str
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    config: dict
+    metrics: dict
+    log_history: list = Field(default_factory=list)
+
+
+class RunComparisonResponse(BaseModel):
+    runs: list[RunComparison]
+    config_diff: list[ConfigDiffEntry]
+
+
+# ===== Inference Context =====
+class DatasetSummary(BaseModel):
+    id: int
+    name: str
+    tokens: int
+
+
+class InferenceContextResponse(BaseModel):
+    datasets: list[DatasetSummary]
+    model: Optional[dict] = None
+
+
+# ===== Dataset Preview-Training =====
+class SamplePreview(BaseModel):
+    raw: str = ""
+    has_messages: bool = False
+    token_count: int = 0
+    messages: Optional[list[dict]] = None
+    templated: Optional[str] = None
+    templated_tokens: Optional[int] = None
+
+
+class DatasetFormatInfo(BaseModel):
+    dataset_id: int
+    filename: str
+    format: str
+    format_description: str = ""
+    sample_count: int = 0
+    samples: list[SamplePreview] = Field(default_factory=list)
+
+
+class TokenSummary(BaseModel):
+    total_examples: int
+    instruction_examples: int
+    text_only_examples: int
+    avg_tokens: int
+    min_tokens: int
+    max_tokens: int
+    total_tokens: int
+
+
+class TrainingPreviewResponse(BaseModel):
+    datasets: list[DatasetFormatInfo]
+    summary: TokenSummary
+
+
+# ===== Augmentation =====
+class AugmentStats(BaseModel):
+    original_count: int
+    final_count: int
+    duplicates_removed: int
+    filtered_out: int
+    filter_reasons: dict = Field(default_factory=dict)
+    reduction_percent: float
+
+
+class AugmentSample(BaseModel):
+    index: int
+    before: str
+    after: str
+    changed: bool
+
+
+class AugmentDatasetInfo(BaseModel):
+    id: int
+    name: str
+    format: str
+    example_count: int
+
+
+class CreatedDataset(BaseModel):
+    id: int
+    filename: str
+
+
+class AugmentationResponse(BaseModel):
+    preview_only: bool
+    datasets: list[AugmentDatasetInfo]
+    stats: AugmentStats
+    samples: list[AugmentSample]
+    created_dataset: Optional[CreatedDataset] = None
+
+
+# ===== Model Status / Download =====
+class DownloadInfo(BaseModel):
+    status: str
+    progress: float = 0.0
+    message: str = ""
+    error: Optional[str] = None
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    local_path: Optional[str] = None
+
+
+class ModelStatusResponse(BaseModel):
+    model_id: str
+    is_cached: bool
+    size_gb: Optional[float] = None
+    download: Optional[DownloadInfo] = None
+
+
+class DownloadStartResponse(BaseModel):
+    detail: str
+    status: str
+    progress: Optional[float] = None
+    estimated_size_gb: Optional[float] = None
+
+
+class DownloadProgressResponse(BaseModel):
+    status: str
+    progress: float = 0.0
+    message: str = ""
+    is_cached: bool = False
+    elapsed_seconds: Optional[int] = None
+    error: Optional[str] = None
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    local_path: Optional[str] = None
+
+
+# ===== GGUF =====
+class GGUFExportResponse(BaseModel):
+    detail: str
+    status: str
+
+
+class GGUFStatusResponse(BaseModel):
+    step: str
+    progress: int = 0
+    message: str = ""
+    error: Optional[str] = None
+    gguf_filename: Optional[str] = None
+    gguf_size_mb: Optional[float] = None
+
+
+# ===== LM Studio =====
+class LMStudioConfigResponse(BaseModel):
+    host: str
+    port: int
+    enabled: bool
+    url: Optional[str] = None
+
+
+class LMStudioConnectionResponse(BaseModel):
+    connected: bool
+    url: Optional[str] = None
+    error: Optional[str] = None
+    models: Optional[list[dict]] = None
+
+
+class LMStudioModelsResponse(BaseModel):
+    models: list[dict] = Field(default_factory=list)
+    enabled: bool = True
+    url: Optional[str] = None
+    message: Optional[str] = None
+
+
+# ===== Health =====
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    db_connected: bool = True
+    db_latency_ms: Optional[float] = None
+
+
+# ===== Email Verification =====
+class VerifyEmailRequest(BaseModel):
+    token: str = Field(..., min_length=1, max_length=512)
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
+# ===== OAuth =====
+class OAuthCallbackRequest(BaseModel):
+    code: str = Field(..., min_length=1)
+    state: Optional[str] = None
+
+
+# ===== Admin =====
+class SystemStatsResponse(BaseModel):
+    users: dict
+    projects: dict
+    datasets: dict
+    training: dict
+    models: dict
+    tasks: dict
+    disk: dict
+
+
+# ===== Backup =====
+class BackupImportResponse(BaseModel):
+    detail: str
+    project_id: int
+    datasets_restored: int
+
+
+# ===== Lineage =====
+class LineageMetrics(BaseModel):
+    current_loss: Optional[float] = None
+    best_loss: Optional[float] = None
+    validation_loss: Optional[float] = None
+    perplexity: Optional[float] = None
+    tokens_per_sec: Optional[float] = None
+    total_epochs: Optional[int] = None
+    total_steps: Optional[int] = None
+    learning_rate_current: Optional[float] = None

@@ -8,7 +8,7 @@ class Dataset(Base):
     __tablename__ = "datasets"
 
     id = Column(Integer, primary_key=True, index=True)
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     filename = Column(String, nullable=False)  # stored filename
     original_name = Column(String, nullable=False)
     file_type = Column(String, nullable=False)

@@ -16,8 +16,12 @@ export default function RegisterPage() {
     const handleSubmit = async (e) => {
         e.preventDefault();
         setError('');
-        if (password.length < 6) {
-            setError('Password must be at least 6 characters');
+        if (password.length < 8) {
+            setError('Password must be at least 8 characters');
+            return;
+        }
+        if (password.length > 128) {
+            setError('Password must be 128 characters or less');
             return;
         }
         setLoading(true);
@@ -64,6 +68,7 @@ export default function RegisterPage() {
                                     className="w-full pl-10 pr-4 py-2.5 border border-surface-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/30 focus:border-primary-500 transition-all"
                                     placeholder="Your name"
                                     required
+                                    maxLength={100}
                                 />
                             </div>
                         </div>
@@ -80,6 +85,7 @@ export default function RegisterPage() {
                                     className="w-full pl-10 pr-4 py-2.5 border border-surface-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/30 focus:border-primary-500 transition-all"
                                     placeholder="you@example.com"
                                     required
+                                    maxLength={320}
                                 />
                             </div>
                         </div>
@@ -94,8 +100,10 @@ export default function RegisterPage() {
                                     value={password}
                                     onChange={(e) => setPassword(e.target.value)}
                                     className="w-full pl-10 pr-10 py-2.5 border border-surface-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/30 focus:border-primary-500 transition-all"
-                                    placeholder="At least 6 characters"
+                                    placeholder="At least 8 characters"
                                     required
+                                    minLength={8}
+                                    maxLength={128}
                                 />
                                 <button
                                     type="button"

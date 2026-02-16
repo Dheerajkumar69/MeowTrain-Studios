@@ -73,6 +73,7 @@ export default function LoginPage() {
                                     className="w-full pl-10 pr-4 py-2.5 border border-surface-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/30 focus:border-primary-500 transition-all"
                                     placeholder="you@example.com"
                                     required
+                                    maxLength={320}
                                 />
                             </div>
                         </div>
@@ -89,6 +90,7 @@ export default function LoginPage() {
                                     className="w-full pl-10 pr-10 py-2.5 border border-surface-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/30 focus:border-primary-500 transition-all"
                                     placeholder="••••••••"
                                     required
+                                    maxLength={128}
                                 />
                                 <button
                                     type="button"
@@ -113,6 +115,12 @@ export default function LoginPage() {
                             )}
                         </button>
                     </form>
+
+                    <div className="text-right mt-2">
+                        <Link to="/forgot-password" className="text-xs text-primary-600 hover:text-primary-700 font-medium">
+                            Forgot password?
+                        </Link>
+                    </div>
 
                     {/* Divider */}
                     <div className="relative my-6">

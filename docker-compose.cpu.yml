@@ -1,0 +1,7 @@
+# CPU-only override — use with: docker compose -f docker-compose.yml -f docker-compose.cpu.yml up
+services:
+  backend:
+    deploy:
+      resources:
+        reservations:
+          devices: []

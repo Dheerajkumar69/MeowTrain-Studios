@@ -1,5 +1,5 @@
 """
-Worker registry — pure Python tracking of active TrainingWorker instances.
+Worker registry -- pure Python tracking of active TrainingWorker instances.
 
 Separate from training_worker.py so it can be imported without torch.
 """
@@ -21,22 +21,37 @@ def get_worker(project_id: int) -> Optional[Any]:
 
 
 def register_worker(project_id: int, worker: Any):
-    """Register a training worker."""
+    """Register a training worker (replaces any existing dead worker)."""
     with _workers_lock:
+        old = _active_workers.get(project_id)
+        if old is not None and not old.is_alive:
+            _safe_cleanup(old)
         _active_workers[project_id] = worker
 
 
 def unregister_worker(project_id: int):
-    """Unregister a training worker."""
+    """Unregister a training worker and release its resources."""
     with _workers_lock:
-        _active_workers.pop(project_id, None)
+        worker = _active_workers.pop(project_id, None)
+        if worker is not None:
+            _safe_cleanup(worker)
 
 
 def cleanup_dead_workers():
-    """Remove workers that are no longer running."""
+    """Remove workers that are no longer running and release their resources."""
     with _workers_lock:
         dead = [pid for pid, w in _active_workers.items() if not w.is_alive]
         for pid in dead:
-            del _active_workers[pid]
+            worker = _active_workers.pop(pid)
+            _safe_cleanup(worker)
     if dead:
         logger.info("Cleaned up %d dead workers", len(dead))
+
+
+def _safe_cleanup(worker: Any):
+    """Call worker.cleanup() if available (releases Manager resources)."""
+    try:
+        if hasattr(worker, "cleanup"):
+            worker.cleanup()
+    except Exception as e:
+        logger.debug("Worker cleanup error (non-fatal): %s", e)

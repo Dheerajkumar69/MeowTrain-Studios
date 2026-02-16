@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { modelsAPI } from '../../services/api';
-import { Check, Download, AlertTriangle, XCircle, Loader, Info } from 'lucide-react';
+import { Check, Download, AlertTriangle, XCircle, Loader, Info, Search, ExternalLink } from 'lucide-react';
 
 const COMPAT_CONFIG = {
     compatible: { label: 'Perfect fit', color: 'text-success-600 bg-success-400/10', icon: Check },
@@ -14,12 +14,50 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
+    // Custom model state
+    const [customModelId, setCustomModelId] = useState('');
+    const [customLooking, setCustomLooking] = useState(false);
+    const [customError, setCustomError] = useState('');
+    const [customModel, setCustomModel] = useState(null);
+    const debounceRef = useRef(null);
+
     useEffect(() => {
         modelsAPI.list()
             .then((res) => setModels(res.data || []))
-            .catch((err) => { console.error(err); setError('Failed to load models. Check backend connection.'); })
+            .catch((err) => { setError('Failed to load models. Check backend connection.'); })
             .finally(() => setLoading(false));
     }, []);
+
+    const lookupCustomModel = useCallback(async () => {
+        const trimmed = customModelId.trim();
+        if (!trimmed) return;
+        // Validate format: org/model-name
+        if (!/^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(trimmed)) {
+            setCustomError('Model ID must be in "org/name" format (e.g. meta-llama/Llama-3.2-3B)');
+            return;
+        }
+        setCustomLooking(true);
+        setCustomError('');
+        setCustomModel(null);
+        try {
+            const res = await modelsAPI.lookupCustom(trimmed);
+            setCustomModel(res.data);
+        } catch (err) {
+            if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
+                setCustomError('Request timed out. Please try again.');
+            } else {
+                setCustomError(err.response?.data?.detail || 'Model not found on HuggingFace Hub.');
+            }
+        } finally {
+            setCustomLooking(false);
+        }
+    }, [customModelId]);
+
+    // Debounced lookup on Enter (prevents rapid fire)
+    const debouncedLookup = useCallback(() => {
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(lookupCustomModel, 300);
+    }, [lookupCustomModel]);
 
     if (loading) {
         return (
@@ -34,7 +72,7 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
             <div>
                 <h2 className="text-xl font-bold text-surface-900">Choose a Base Model</h2>
                 <p className="text-sm text-surface-500 mt-1">
-                    Select the AI model to start from. Compatibility is checked against your hardware.
+                    Select from the catalog or use any HuggingFace model.
                 </p>
             </div>
 
@@ -43,6 +81,101 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                     <XCircle className="w-4 h-4 shrink-0" /> {error}
                 </div>
             )}
+
+            {/* Custom Model Input */}
+            <div className="bg-gradient-to-r from-primary-50 to-primary-100/50 rounded-2xl border border-primary-200 p-5">
+                <h3 className="text-sm font-semibold text-primary-800 mb-1 flex items-center gap-2">
+                    🤗 Use Any HuggingFace Model
+                </h3>
+                <p className="text-xs text-primary-600 mb-3">
+                    Enter a model ID from HuggingFace Hub (e.g. <code className="bg-primary-200/50 px-1 rounded">meta-llama/Llama-3.2-3B</code>)
+                </p>
+                <div className="flex gap-2">
+                    <input
+                        type="text"
+                        value={customModelId}
+                        onChange={(e) => setCustomModelId(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && debouncedLookup()}
+                        placeholder="org/model-name"
+                        className="flex-1 px-4 py-2.5 bg-white border border-primary-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/30 placeholder:text-surface-400"
+                    />
+                    <button
+                        onClick={debouncedLookup}
+                        disabled={customLooking || !customModelId.trim()}
+                        className="px-5 py-2.5 bg-primary-500 text-white rounded-xl text-sm font-medium hover:bg-primary-600 transition-colors disabled:opacity-50 flex items-center gap-2"
+                    >
+                        {customLooking ? (
+                            <Loader className="w-4 h-4 animate-spin" />
+                        ) : (
+                            <Search className="w-4 h-4" />
+                        )}
+                        Lookup
+                    </button>
+                </div>
+
+                {customError && (
+                    <div className="mt-3 bg-danger-400/10 border border-danger-400/30 text-danger-600 text-xs rounded-lg p-3 flex items-center gap-2">
+                        <XCircle className="w-3.5 h-3.5 shrink-0" /> {customError}
+                    </div>
+                )}
+
+                {customModel && (
+                    <div className={`mt-3 bg-white rounded-xl border-2 p-4 cursor-pointer transition-all ${selectedModel?.model_id === customModel.model_id
+                        ? 'border-primary-500 shadow-md ring-2 ring-primary-500/20'
+                        : 'border-surface-200 hover:border-primary-300'
+                        }`}
+                        onClick={() => onSelectModel(customModel)}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectModel(customModel); } }}
+                        role="button"
+                        tabIndex={0}
+                        aria-pressed={selectedModel?.model_id === customModel.model_id}
+                        aria-label={`Select custom model ${customModel.name}`}
+                    >
+                        <div className="flex items-start justify-between mb-2">
+                            <div className="flex items-center gap-2">
+                                <span className="text-2xl">{customModel.icon}</span>
+                                <div>
+                                    <h4 className="font-semibold text-surface-900 text-sm">{customModel.name}</h4>
+                                    <p className="text-xs text-surface-500">{customModel.parameters} params • {customModel.size_gb} GB</p>
+                                </div>
+                            </div>
+                            {selectedModel?.model_id === customModel.model_id && (
+                                <div className="w-5 h-5 rounded-full bg-primary-500 flex items-center justify-center">
+                                    <Check className="w-3 h-3 text-white" />
+                                </div>
+                            )}
+                        </div>
+                        <p className="text-xs text-surface-600 mb-2">{customModel.description}</p>
+                        <div className="flex items-center justify-between">
+                            {(() => {
+                                const compat = COMPAT_CONFIG[customModel.compatibility] || COMPAT_CONFIG.unknown;
+                                const CompatIcon = compat.icon;
+                                return (
+                                    <span className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full ${compat.color}`}>
+                                        <CompatIcon className="w-3 h-3" /> {compat.label}
+                                    </span>
+                                );
+                            })()}
+                            <a
+                                href={`https://huggingface.co/${customModel.model_id}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-xs text-primary-500 hover:text-primary-700 flex items-center gap-1"
+                            >
+                                <ExternalLink className="w-3 h-3" /> View on HuggingFace
+                            </a>
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            {/* Catalog Separator */}
+            <div className="flex items-center gap-3">
+                <div className="h-px bg-surface-200 flex-1" />
+                <span className="text-xs font-medium text-surface-400 uppercase tracking-wide">Or choose from catalog</span>
+                <div className="h-px bg-surface-200 flex-1" />
+            </div>
 
             {!error && models.length === 0 && !loading && (
                 <div className="text-center py-16">
@@ -64,7 +197,12 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                         <div
                             key={model.model_id}
                             onClick={() => onSelectModel(model)}
-                            className={`bg-white rounded-2xl border-2 p-5 cursor-pointer transition-all hover:shadow-lg ${isSelected
+                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectModel(model); } }}
+                            role="button"
+                            tabIndex={0}
+                            aria-pressed={isSelected}
+                            aria-label={`Select model ${model.name}, ${model.parameters} parameters, ${compat.label}`}
+                            className={`bg-white rounded-2xl border-2 p-5 cursor-pointer transition-all hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-primary-500/50 ${isSelected
                                 ? 'border-primary-500 shadow-md ring-2 ring-primary-500/20'
                                 : 'border-surface-100 hover:border-primary-200'
                                 }`}
