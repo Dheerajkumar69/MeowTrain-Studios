@@ -26,7 +26,17 @@ export default function ExportPanel({ projectId, setError }) {
         try {
             await modelsAPI.exportGGUF(projectId, quantization);
             if (ggufPollRef.current) clearInterval(ggufPollRef.current);
+            const MAX_POLL_MS = 30 * 60 * 1000; // 30 minutes
+            const pollStart = Date.now();
             ggufPollRef.current = setInterval(async () => {
+                // Timeout guard: stop polling after 30 minutes
+                if (Date.now() - pollStart > MAX_POLL_MS) {
+                    clearInterval(ggufPollRef.current);
+                    ggufPollRef.current = null;
+                    setGgufExporting(false);
+                    setGgufStatus({ step: 'error', message: 'Export timed out after 30 minutes. The model may be too large. Check server logs.' });
+                    return;
+                }
                 try {
                     const res = await modelsAPI.ggufStatus(projectId);
                     setGgufStatus(res.data);

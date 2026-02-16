@@ -224,6 +224,7 @@ def _download_model_thread(model_id: str, model_name: str):
 
         from app.utils.lazy_imports import huggingface_hub as _hf_hub
         snapshot_download = _hf_hub().snapshot_download
+        from tqdm.auto import tqdm as _tqdm_base
 
         hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 
@@ -232,6 +233,59 @@ def _download_model_thread(model_id: str, model_name: str):
                      message=f"Downloading {model_name} from HuggingFace...")
 
         logger.info("Starting download: %s", model_id)
+
+        # ── Real-time progress tracking via custom tqdm class ────────
+        # Aggregates bytes across all files that snapshot_download fetches
+        # and writes progress to the DB every 2 seconds (throttled).
+        _progress_state = {
+            "downloaded": 0,
+            "total": 0,
+            "last_db_update": 0.0,
+            "file_totals": {},   # tqdm-id → total bytes for that bar
+            "file_done": {},     # tqdm-id → bytes downloaded so far
+        }
+        _DB_UPDATE_INTERVAL = 2.0  # seconds between DB progress writes
+
+        class _DownloadProgressTracker(_tqdm_base):
+            """tqdm wrapper that reports aggregate download progress to the DB."""
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                bar_id = id(self)
+                if self.total and self.total > 0:
+                    _progress_state["file_totals"][bar_id] = self.total
+                    _progress_state["file_done"][bar_id] = 0
+                    _progress_state["total"] = sum(_progress_state["file_totals"].values())
+
+            def update(self, n=1):
+                super().update(n)
+                bar_id = id(self)
+                if bar_id in _progress_state["file_done"]:
+                    _progress_state["file_done"][bar_id] += n
+                    _progress_state["downloaded"] = sum(_progress_state["file_done"].values())
+
+                    # Throttle DB writes to every _DB_UPDATE_INTERVAL seconds
+                    now = time.time()
+                    if now - _progress_state["last_db_update"] >= _DB_UPDATE_INTERVAL:
+                        _progress_state["last_db_update"] = now
+                        total = _progress_state["total"]
+                        done = _progress_state["downloaded"]
+                        if total > 0:
+                            # Map to 5–95% range (5% = init, 95–100% = finalize)
+                            pct = 5.0 + (done / total) * 90.0
+                            done_mb = done / (1024 * 1024)
+                            total_mb = total / (1024 * 1024)
+                            _update_task(
+                                "download", model_id,
+                                progress=round(min(pct, 95.0), 1),
+                                message=f"Downloading {model_name}: {done_mb:.0f} / {total_mb:.0f} MB ({pct:.0f}%)",
+                            )
+
+            def close(self):
+                super().close()
+                bar_id = id(self)
+                _progress_state["file_totals"].pop(bar_id, None)
+                _progress_state["file_done"].pop(bar_id, None)
 
         # Use a threading.Event that we check inside a tqdm callback
         cancel_event = threading.Event()
@@ -275,6 +329,7 @@ def _download_model_thread(model_id: str, model_name: str):
                 "*.gguf", "*.bin", "*.msgpack",
                 "consolidated.*", "original/**",
             ],
+            tqdm_class=_DownloadProgressTracker,
         )
 
         # Check one final time — download might have completed before cancel registered

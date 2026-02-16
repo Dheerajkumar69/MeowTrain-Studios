@@ -54,6 +54,24 @@ export default function TrainingPanel({ projectId, selectedModel, datasets, proj
 
     const readyDatasets = datasets?.filter((d) => d.status === 'ready') || [];
 
+    // ── Restore active training state on mount ──────────────────
+    useEffect(() => {
+        let cancelled = false;
+        const checkActive = async () => {
+            try {
+                const res = await trainingAPI.status(projectId);
+                if (cancelled) return;
+                const s = res.data?.status;
+                if (s === 'running' || s === 'paused' || s === 'training') {
+                    setStatus(res.data);
+                    setTraining(true);
+                }
+            } catch { /* no active training — stay idle */ }
+        };
+        checkActive();
+        return () => { cancelled = true; };
+    }, [projectId]);
+
     // ── Hardware polling (always-on) ─────────────────────────────
     useEffect(() => {
         const poll = async () => {

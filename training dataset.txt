@@ -1,0 +1,152 @@
+[
+  {
+    "instruction": "Explain recursion in simple terms.",
+    "input": "",
+    "output": "Recursion is when a function calls itself to solve smaller versions of the same problem. It keeps repeating until it reaches a base case, which stops the repetition."
+  },
+  {
+    "instruction": "What is the difference between a list and a tuple in Python?",
+    "input": "",
+    "output": "A list is mutable, meaning it can be changed after creation. A tuple is immutable, meaning its values cannot be modified once created."
+  },
+  {
+    "instruction": "Explain how the internet works in simple terms.",
+    "input": "",
+    "output": "The internet is a global network of computers connected together. When you request a website, your device sends a request to a server, and the server sends back the data needed to display that website."
+  },
+  {
+    "instruction": "What is overfitting in machine learning?",
+    "input": "",
+    "output": "Overfitting happens when a model learns the training data too well, including noise and random details. As a result, it performs poorly on new, unseen data."
+  },
+  {
+    "instruction": "Explain what a database index is.",
+    "input": "",
+    "output": "A database index is a data structure that improves the speed of data retrieval. It works like an index in a book, helping the database find rows faster."
+  },
+  {
+    "instruction": "What is a REST API?",
+    "input": "",
+    "output": "A REST API is a way for systems to communicate over HTTP using standard methods like GET, POST, PUT, and DELETE. It follows specific architectural principles."
+  },
+  {
+    "instruction": "Explain Big-O notation.",
+    "input": "",
+    "output": "Big-O notation describes how the time or space complexity of an algorithm grows as the input size increases."
+  },
+  {
+    "instruction": "What is Docker?",
+    "input": "",
+    "output": "Docker is a platform that allows developers to package applications and their dependencies into containers, ensuring consistent execution across environments."
+  },
+  {
+    "instruction": "Explain gradient descent.",
+    "input": "",
+    "output": "Gradient descent is an optimization algorithm used to minimize a function. It works by iteratively moving in the direction of the negative gradient to reduce error."
+  },
+  {
+    "instruction": "What is a primary key in SQL?",
+    "input": "",
+    "output": "A primary key is a column or set of columns that uniquely identifies each row in a database table."
+  },
+  {
+    "instruction": "Explain the concept of middleware.",
+    "input": "",
+    "output": "Middleware is software that sits between two systems and helps them communicate, process requests, or modify data."
+  },
+  {
+    "instruction": "What is version control?",
+    "input": "",
+    "output": "Version control is a system that tracks changes to files over time, allowing developers to collaborate and revert to previous versions if needed."
+  },
+  {
+    "instruction": "Explain event-driven programming.",
+    "input": "",
+    "output": "Event-driven programming is a paradigm where the flow of execution is determined by events like user actions, messages, or sensor outputs."
+  },
+  {
+    "instruction": "What is a neural network?",
+    "input": "",
+    "output": "A neural network is a machine learning model inspired by the human brain. It consists of layers of interconnected nodes that process information."
+  },
+  {
+    "instruction": "Explain caching in web development.",
+    "input": "",
+    "output": "Caching stores frequently accessed data temporarily so that future requests can be served faster without recomputing or refetching the data."
+  },
+  {
+    "instruction": "What is CI/CD?",
+    "input": "",
+    "output": "CI/CD stands for Continuous Integration and Continuous Deployment. It automates testing and deployment of code to ensure faster and safer releases."
+  },
+  {
+    "instruction": "Explain polymorphism in OOP.",
+    "input": "",
+    "output": "Polymorphism allows objects of different classes to be treated as objects of a common superclass, enabling flexible and reusable code."
+  },
+  {
+    "instruction": "What is a load balancer?",
+    "input": "",
+    "output": "A load balancer distributes incoming traffic across multiple servers to ensure reliability and optimal performance."
+  },
+  {
+    "instruction": "Explain normalization in databases.",
+    "input": "",
+    "output": "Normalization is the process of organizing database tables to reduce redundancy and improve data integrity."
+  },
+  {
+    "instruction": "What is a hash function?",
+    "input": "",
+    "output": "A hash function converts input data into a fixed-size string of characters, typically used for fast lookups or security purposes."
+  },
+  {
+    "instruction": "Explain multithreading.",
+    "input": "",
+    "output": "Multithreading allows a program to run multiple threads simultaneously, improving performance and responsiveness."
+  },
+  {
+    "instruction": "What is a virtual machine?",
+    "input": "",
+    "output": "A virtual machine is a software-based computer that runs on a physical machine and behaves like a separate computer."
+  },
+  {
+    "instruction": "Explain what an API key is.",
+    "input": "",
+    "output": "An API key is a unique identifier used to authenticate requests made to an API."
+  },
+  {
+    "instruction": "What is serverless computing?",
+    "input": "",
+    "output": "Serverless computing allows developers to run code without managing servers. The cloud provider handles infrastructure automatically."
+  },
+  {
+    "instruction": "Explain what latency means in networking.",
+    "input": "",
+    "output": "Latency is the time it takes for data to travel from one point to another in a network."
+  },
+  {
+    "instruction": "What is a compiler?",
+    "input": "",
+    "output": "A compiler translates source code written in a programming language into machine code that a computer can execute."
+  },
+  {
+    "instruction": "Explain the difference between TCP and UDP.",
+    "input": "",
+    "output": "TCP is a reliable, connection-based protocol that ensures data delivery. UDP is faster but does not guarantee delivery."
+  },
+  {
+    "instruction": "What is Kubernetes?",
+    "input": "",
+    "output": "Kubernetes is an open-source platform used to automate deployment, scaling, and management of containerized applications."
+  },
+  {
+    "instruction": "Explain memory leaks.",
+    "input": "",
+    "output": "A memory leak occurs when a program allocates memory but fails to release it, leading to increased memory usage over time."
+  },
+  {
+    "instruction": "What is encryption?",
+    "input": "",
+    "output": "Encryption is the process of converting data into a secure format so that only authorized parties can access it."
+  }
+]

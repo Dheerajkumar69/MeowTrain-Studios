@@ -51,6 +51,15 @@ export function AuthProvider({ children }) {
         setUser(null);
     }, []);
 
+    // Listen for force-logout events from the API interceptor (e.g. token refresh failure)
+    useEffect(() => {
+        const handleForceLogout = () => {
+            setUser(null);
+        };
+        window.addEventListener('meowllm:force-logout', handleForceLogout);
+        return () => window.removeEventListener('meowllm:force-logout', handleForceLogout);
+    }, []);
+
     /** Update user state in-place after profile edits (avoids full refetch). */
     const updateUser = useCallback((updates) => {
         setUser((prev) => (prev ? { ...prev, ...updates } : prev));

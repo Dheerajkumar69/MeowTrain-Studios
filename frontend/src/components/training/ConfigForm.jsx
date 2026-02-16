@@ -9,6 +9,7 @@ import {
 import { BarGauge } from './Gauges';
 import RunComparisonPanel from './RunComparisonPanel';
 import { trainingAPI } from '../../services/api';
+import { useToast } from '../Toast';
 
 const METHOD_INFO = {
     lora: { label: 'LoRA', desc: 'Fast & memory-efficient. Recommended for most users.' },
@@ -40,6 +41,7 @@ export default function ConfigForm({
     config, setConfig, selectedModel, readyDatasets, hardware,
     projectId, error, setError, actionPending, onStartTraining,
 }) {
+    const toast = useToast();
     const [lrPreset, setLrPreset] = useState('balanced');
     const [showAdvanced, setShowAdvanced] = useState(false);
     const [showComparison, setShowComparison] = useState(false);
@@ -354,6 +356,20 @@ export default function ConfigForm({
                             {selectedModel ? `Model: ${selectedModel.name}` : 'No model selected'}
                         </span>
                     </div>
+                    {selectedModel && !selectedModel.is_cached && (
+                        <div className="flex items-center gap-2 text-sm">
+                            <AlertCircle className="w-4 h-4 text-amber-500" />
+                            <span className="text-amber-600">
+                                Model not downloaded yet — it will be downloaded automatically when training starts, or you can pre-download it from the Model tab.
+                            </span>
+                        </div>
+                    )}
+                    {selectedModel && selectedModel.is_cached && (
+                        <div className="flex items-center gap-2 text-sm">
+                            <CheckCircle className="w-4 h-4 text-emerald-500" />
+                            <span className="text-surface-700">Model downloaded & cached</span>
+                        </div>
+                    )}
                 </div>
             </div>
 
@@ -421,7 +437,7 @@ export default function ConfigForm({
                         const res = await trainingAPI.history(projectId);
                         setRunHistory(res.data.runs || []);
                         setShowComparison(!showComparison);
-                    } catch (e) { /* ignore */ }
+                    } catch (e) { toast.error('Failed to load run history'); }
                 }}
                 className="w-full py-2.5 bg-surface-50 border border-surface-200 text-surface-600 rounded-2xl text-sm font-medium hover:bg-surface-100 transition-all flex items-center justify-center gap-2"
             >

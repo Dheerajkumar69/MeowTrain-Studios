@@ -22,7 +22,6 @@ from app.ml.worker_registry import (
     unregister_worker,
     cleanup_dead_workers,
 )
-from app.models.model_config import ModelConfig
 
 logger = logging.getLogger("meowllm.routes.training")
 
@@ -362,7 +361,7 @@ def delete_training_run(
         )
 
     # Clean up associated checkpoint files if they exist
-    checkpoint_dir = PROJECTS_DIR / str(project.id) / "checkpoints" / f"run-{run_id}"
+    checkpoint_dir = PROJECTS_DIR / str(project.id) / "checkpoints" / f"run_{run_id}"
     if checkpoint_dir.exists():
         import shutil
         shutil.rmtree(checkpoint_dir, ignore_errors=True)

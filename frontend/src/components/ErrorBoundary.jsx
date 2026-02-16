@@ -12,7 +12,7 @@ export class ErrorBoundary extends React.Component {
     }
 
     componentDidCatch(error, info) {
-        // Error captured by boundary — no console logging in production
+        console.error('[ErrorBoundary] Caught error:', error, info?.componentStack);
     }
 
     render() {

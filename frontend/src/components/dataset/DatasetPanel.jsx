@@ -17,6 +17,7 @@ export default function DatasetPanel({ projectId, datasets, setDatasets }) {
     const toast = useToast();
 
     const handleFiles = async (files) => {
+        if (uploading) return; // Prevent concurrent uploads
         setUploading(true);
         for (const file of files) {
             try {

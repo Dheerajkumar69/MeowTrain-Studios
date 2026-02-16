@@ -15,6 +15,16 @@ import ChatInput from './ChatInput';
 import SettingsPanel from './SettingsPanel';
 
 export default function PlaygroundPanel({ projectId, project, datasets }) {
+    // Guard: projectId is required for all API calls
+    if (!projectId) {
+        return (
+            <div className="flex flex-col items-center justify-center py-16 text-center">
+                <AlertTriangle className="w-8 h-8 text-surface-400 mb-3" />
+                <p className="text-sm text-surface-500">No project selected. Please navigate to a project first.</p>
+            </div>
+        );
+    }
+
     const [messages, setMessages] = useState([]);
     const [input, setInput] = useState('');
     const [systemPrompt, setSystemPrompt] = useState('You are a helpful assistant.');
@@ -64,16 +74,16 @@ export default function PlaygroundPanel({ projectId, project, datasets }) {
                         setLmsConnected(true);
                         if (r.data.models.length > 0) setSelectedLmsModel(r.data.models[0].model_id);
                     }
-                }).catch(() => {});
+                }).catch(() => { });
             }
-        }).catch(() => {});
+        }).catch(() => { });
 
         // Check model availability
         setModelChecking(true);
         inferenceAPI.getContext(projectId).then((res) => {
             setModelInfo(res.data?.model || null);
         }).catch(() => setModelInfo(null))
-          .finally(() => setModelChecking(false));
+            .finally(() => setModelChecking(false));
     }, [projectId]);
 
     const sendMessage = async () => {

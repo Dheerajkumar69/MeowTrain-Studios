@@ -18,6 +18,7 @@ api.interceptors.request.use((config) => {
 // Handle 401 responses — attempt token refresh before giving up
 let _isRefreshing = false;
 let _refreshQueue = [];
+let _lastNetworkEvent = 0;
 
 function _processQueue(error, token = null) {
     _refreshQueue.forEach(({ resolve, reject }) => {
@@ -60,9 +61,33 @@ api.interceptors.response.use(
             } catch (refreshError) {
                 _processQueue(refreshError, null);
                 localStorage.removeItem('meowllm_token');
+                // Dispatch a custom event so AuthContext can clear user state
+                window.dispatchEvent(new Event('meowllm:force-logout'));
                 return Promise.reject(refreshError);
             } finally {
                 _isRefreshing = false;
+            }
+        }
+
+        // ── Network / server error detection ────────────────────────
+        // Fires a custom event when the backend is unreachable or returns 502/503/504.
+        // Throttled so the event fires at most once every 10 seconds.
+        const status = error.response?.status;
+        const isNetworkError = !error.response; // no response = offline / CORS / DNS
+        const isServerDown = status === 502 || status === 503 || status === 504;
+        if (isNetworkError || isServerDown) {
+            const now = Date.now();
+            if (!_lastNetworkEvent || now - _lastNetworkEvent > 10_000) {
+                _lastNetworkEvent = now;
+                window.dispatchEvent(new CustomEvent('meowllm:network-error', {
+                    detail: {
+                        type: isNetworkError ? 'offline' : 'server-error',
+                        status: status || 0,
+                        message: isNetworkError
+                            ? 'Cannot reach the server. Check your connection.'
+                            : `Server error (${status}). The backend may be restarting.`,
+                    },
+                }));
             }
         }
 
@@ -121,7 +146,9 @@ export const modelsAPI = {
     list: () => api.get('/models/'),
     status: (modelId) => api.get(`/models/${encodeURIComponent(modelId)}/status`),
     download: (modelId) => api.post(`/models/${encodeURIComponent(modelId)}/download`),
+    downloadProgress: (modelId) => api.get(`/models/${encodeURIComponent(modelId)}/download/progress`),
     cancelDownload: (modelId) => api.delete(`/models/${encodeURIComponent(modelId)}/download`),
+    deleteCache: (modelId) => api.delete(`/models/${encodeURIComponent(modelId)}/cache`),
     exportModel: (projectId) => api.get(`/models/export/${projectId}`, { responseType: 'blob', timeout: 300000 }),
     // Custom model lookup
     lookupCustom: (modelId) => api.post('/models/custom/lookup', null, { params: { model_id: modelId } }),

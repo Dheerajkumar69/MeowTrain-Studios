@@ -180,6 +180,14 @@ def change_password(
     if user.is_guest:
         raise HTTPException(status_code=403, detail="Guest users cannot change password")
 
+    # OAuth-only users don't have a password set
+    if not user.password_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="Your account uses OAuth login and has no password set. "
+                   "Use the 'Forgot Password' flow to set one."
+        )
+
     if not verify_password(req.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
 
@@ -295,11 +303,8 @@ def forgot_password(
             reset_token,
         )
 
-    # Return the token in response for local-dev convenience
-    # In production, remove this and send via email instead
-    if SMTP_ENABLED:
-        return {"detail": _success_msg}
-    return {"detail": f"{_success_msg} [DEV] Token: {reset_token}"}
+    # Always return the same generic message (never expose token in response)
+    return {"detail": _success_msg}
 
 
 @router.post("/reset-password", response_model=DetailResponse)

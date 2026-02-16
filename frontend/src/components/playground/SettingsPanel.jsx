@@ -2,7 +2,7 @@
  * SettingsPanel — side panel with LM Studio, system prompt,
  * temperature, max tokens, streaming toggle, context, and templates.
  */
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
     Thermometer, Save, BookOpen, FileText,
     Server, Wifi, WifiOff, RefreshCw, Zap,
@@ -30,10 +30,12 @@ export default function SettingsPanel({
     const [templatesLoaded, setTemplatesLoaded] = useState(false);
 
     // Lazy load templates the first time panel shows
-    if (showTemplates && !templatesLoaded) {
-        setTemplatesLoaded(true);
-        inferenceAPI.listPrompts(projectId).then((res) => setTemplates(res.data)).catch(() => {});
-    }
+    useEffect(() => {
+        if (showTemplates && !templatesLoaded) {
+            setTemplatesLoaded(true);
+            inferenceAPI.listPrompts(projectId).then((res) => setTemplates(res.data)).catch(() => {});
+        }
+    }, [showTemplates, templatesLoaded, projectId]);
 
     const loadLmsModels = async () => {
         try {

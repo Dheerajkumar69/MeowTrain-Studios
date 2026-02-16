@@ -56,7 +56,8 @@ export default function DashboardPage() {
                 const res = await projectsAPI.list();
                 setProjects(res.data?.items ?? res.data ?? []);
             } catch (err) {
-                // silently handle error — UI shows no projects
+                console.error('Failed to load projects:', err);
+                toast.error('Failed to load projects. Please refresh the page.');
             } finally {
                 setLoading(false);
             }
@@ -64,7 +65,7 @@ export default function DashboardPage() {
         loadProjects();
     }, []);
 
-    // Poll hardware every 0.5s
+    // Poll hardware every 3s
     useEffect(() => {
         const pollHardware = async () => {
             try {
@@ -403,7 +404,7 @@ export default function DashboardPage() {
 
             {/* New Project Modal */}
             {showModal && (
-                <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setShowModal(false)}>
+                <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => { setShowModal(false); setNewName(''); setNewDesc(''); setNewUse('custom'); }}>
                     <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 animate-fade-in" onClick={(e) => e.stopPropagation()}>
                         <h2 className="text-xl font-bold text-surface-900 mb-6 flex items-center gap-2">
                             <Sparkles className="w-5 h-5 text-primary-500" /> New Project

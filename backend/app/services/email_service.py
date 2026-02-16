@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import smtplib
+import ssl
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -32,8 +33,9 @@ def send_email(to: str, subject: str, html_body: str) -> bool:
         msg["Subject"] = subject
         msg.attach(MIMEText(html_body, "html"))
 
+        context = ssl.create_default_context()
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
-            server.starttls()
+            server.starttls(context=context)
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.send_message(msg)
 

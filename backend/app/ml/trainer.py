@@ -412,7 +412,7 @@ def create_model_and_trainer(
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         callbacks=callbacks,
     )
 
@@ -456,15 +456,15 @@ def _load_model(model_name: str, training_method: str):
             logger.info("QLoRA: Using 4-bit quantization")
         except ImportError:
             logger.warning("bitsandbytes not available, falling back to standard LoRA")
-            load_kwargs["torch_dtype"] = torch.float16 if torch.cuda.is_available() else torch.float32
+            load_kwargs["dtype"] = torch.float16 if torch.cuda.is_available() else torch.float32
 
     elif training_method == "lora":
-        load_kwargs["torch_dtype"] = torch.float16 if torch.cuda.is_available() else torch.float32
+        load_kwargs["dtype"] = torch.float16 if torch.cuda.is_available() else torch.float32
         if torch.cuda.is_available():
             load_kwargs["device_map"] = "auto"
 
     else:  # full fine-tune
-        load_kwargs["torch_dtype"] = torch.float16 if torch.cuda.is_available() else torch.float32
+        load_kwargs["dtype"] = torch.float16 if torch.cuda.is_available() else torch.float32
         if torch.cuda.is_available():
             load_kwargs["device_map"] = "auto"
 

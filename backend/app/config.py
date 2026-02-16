@@ -8,7 +8,7 @@ _env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_env_path)
 
 # ===== Database =====
-DATABASE_URL = os.getenv("MEOWLLM_DATABASE_URL", "sqlite:///./meowllm.db")
+DATABASE_URL = os.getenv("MEOWLLM_DATABASE_URL", "sqlite:///./data/meowllm.db")
 
 # ===== Paths =====
 DATA_DIR = Path(os.getenv("MEOWLLM_DATA_DIR", "./data"))

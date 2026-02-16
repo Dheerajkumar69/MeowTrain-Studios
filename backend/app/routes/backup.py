@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import shutil
 import tempfile
 import zipfile
@@ -215,15 +216,30 @@ def import_project(
     datasets_dir.mkdir(parents=True, exist_ok=True)
     adapters_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Safe extraction helper (prevents zip-slip) ──
+    def _safe_extract(zf_ref, arcname: str, dest_dir: Path) -> bool:
+        """Extract a single file from the zip, ensuring the path stays within dest_dir."""
+        target = (dest_dir / arcname).resolve()
+        dest_resolved = dest_dir.resolve()
+        if not str(target).startswith(str(dest_resolved) + os.sep) and target != dest_resolved:
+            logger.warning("Zip-slip attempt blocked: %s -> %s", arcname, target)
+            return False
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with zf_ref.open(arcname) as src, open(target, "wb") as dst:
+            dst.write(src.read())
+        return True
+
     # Restore datasets
     dataset_count = 0
     for ds_meta in metadata.get("datasets", []):
         filename = ds_meta.get("filename", "")
+        if not filename or ".." in filename or filename.startswith("/"):
+            logger.warning("Skipping dataset with unsafe filename: %s", filename)
+            continue
         arcname = f"datasets/{filename}"
         if arcname in zf.namelist():
-            # Extract the file
-            zf.extract(arcname, path=str(project_dir))
-            dataset_count += 1
+            if _safe_extract(zf, arcname, project_dir):
+                dataset_count += 1
 
         # Create DB record
         new_ds = Dataset(
@@ -249,13 +265,10 @@ def import_project(
         )
         db.add(new_pt)
 
-    # Restore adapter files
+    # Restore adapter files (safe extraction)
     adapter_files = [n for n in zf.namelist() if n.startswith("adapters/") and not n.endswith("/")]
     for arcname in adapter_files:
-        target = project_dir / arcname
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with zf.open(arcname) as src, open(target, "wb") as dst:
-            dst.write(src.read())
+        _safe_extract(zf, arcname, project_dir)
 
     db.commit()
     zf.close()
