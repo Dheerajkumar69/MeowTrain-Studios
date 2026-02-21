@@ -154,7 +154,9 @@ def list_datasets(
 
     query = db.query(Dataset).filter(Dataset.project_id == project.id)
     if search:
-        query = query.filter(Dataset.original_name.ilike(f"%{search}%"))
+        # Escape SQL LIKE special characters to prevent pattern injection
+        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        query = query.filter(Dataset.original_name.ilike(f"%{escaped}%", escape="\\"))
     if status:
         query = query.filter(Dataset.status == status)
 

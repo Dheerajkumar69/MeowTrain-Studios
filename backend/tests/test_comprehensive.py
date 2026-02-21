@@ -630,9 +630,9 @@ class TestPromptTemplatesExtended:
 # ──────────────────────────────────────────────────────────────
 
 class TestHardwareExtended:
-    def test_hardware_all_fields(self, client):
+    def test_hardware_all_fields(self, client, auth_headers):
         """Hardware endpoint should return all expected fields."""
-        data = client.get("/api/hardware/").json()
+        data = client.get("/api/hardware/", headers=auth_headers).json()
         required = ["cpu_name", "cpu_cores", "cpu_usage_percent",
                      "ram_total_gb", "ram_available_gb", "ram_used_gb",
                      "gpu_available", "disk_total_gb", "disk_free_gb",
@@ -640,8 +640,8 @@ class TestHardwareExtended:
         for field in required:
             assert field in data, f"Missing field: {field}"
 
-    def test_hardware_ram_consistency(self, client):
-        data = client.get("/api/hardware/").json()
+    def test_hardware_ram_consistency(self, client, auth_headers):
+        data = client.get("/api/hardware/", headers=auth_headers).json()
         # Used + Available should be approximately Total
         if data["ram_total_gb"] > 0:
             assert data["ram_used_gb"] >= 0

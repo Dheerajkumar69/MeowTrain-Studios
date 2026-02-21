@@ -17,6 +17,11 @@ GPU detection strategy:
 """
 
 import logging
+import warnings
+
+# Suppress pynvml deprecation warning (nvidia-ml-py re-exports the same API)
+warnings.filterwarnings("ignore", message=".*pynvml.*deprecated.*", category=FutureWarning)
+
 import psutil
 import shutil
 import platform

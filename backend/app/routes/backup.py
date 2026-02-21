@@ -35,6 +35,17 @@ logger = logging.getLogger("meowllm.routes.backup")
 
 router = APIRouter(prefix="/projects", tags=["Backup"])
 
+# Maximum total uncompressed size to prevent decompression bombs (2 GB)
+_MAX_DECOMPRESSED_SIZE = 2 * 1024 * 1024 * 1024
+# Maximum number of datasets allowed in a single import
+_MAX_IMPORT_DATASETS = 500
+# Allowed file extensions for extracted files
+_ALLOWED_EXTENSIONS = {
+    ".json", ".jsonl", ".csv", ".txt", ".parquet", ".tsv",
+    ".bin", ".safetensors", ".pt", ".pth", ".gguf",
+    ".model", ".vocab", ".cfg", ".yaml", ".yml",
+}
+
 
 def _serialize_datetime(obj):
     """JSON serializer for datetime objects."""
@@ -198,11 +209,33 @@ def import_project(
     if not project_meta.get("name"):
         raise HTTPException(status_code=400, detail="Project name missing in metadata")
 
+    # ── Validate metadata field types and lengths ──
+    project_name = str(project_meta.get("name", ""))[:200]
+    if not project_name.strip():
+        raise HTTPException(status_code=400, detail="Project name cannot be blank")
+    project_desc = str(project_meta.get("description", ""))[:2000]
+    dataset_list = metadata.get("datasets", [])
+    if not isinstance(dataset_list, list):
+        raise HTTPException(status_code=400, detail="Invalid datasets format in metadata")
+    if len(dataset_list) > _MAX_IMPORT_DATASETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many datasets in backup ({len(dataset_list)}). Maximum is {_MAX_IMPORT_DATASETS}.",
+        )
+
+    # ── Decompression bomb check ──
+    total_uncompressed = sum(info.file_size for info in zf.infolist())
+    if total_uncompressed > _MAX_DECOMPRESSED_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Archive uncompressed size ({total_uncompressed // (1024*1024)} MB) exceeds the 2 GB safety limit.",
+        )
+
     # Create new project
     new_project = Project(
         user_id=user.id,
-        name=f"{project_meta['name']} (imported)",
-        description=project_meta.get("description", ""),
+        name=f"{project_name} (imported)",
+        description=project_desc,
         intended_use=project_meta.get("intended_use", "custom"),
         status="created",
     )
@@ -231,13 +264,27 @@ def import_project(
 
     # Restore datasets
     dataset_count = 0
-    for ds_meta in metadata.get("datasets", []):
-        filename = ds_meta.get("filename", "")
+    extracted_bytes = 0
+    for ds_meta in dataset_list:
+        if not isinstance(ds_meta, dict):
+            continue
+        filename = str(ds_meta.get("filename", ""))[:255]
         if not filename or ".." in filename or filename.startswith("/"):
             logger.warning("Skipping dataset with unsafe filename: %s", filename)
             continue
+        # Validate file extension
+        ext = Path(filename).suffix.lower()
+        if ext and ext not in _ALLOWED_EXTENSIONS:
+            logger.warning("Skipping dataset with disallowed extension: %s", filename)
+            continue
         arcname = f"datasets/{filename}"
         if arcname in zf.namelist():
+            # Track decompressed size
+            member_info = zf.getinfo(arcname)
+            extracted_bytes += member_info.file_size
+            if extracted_bytes > _MAX_DECOMPRESSED_SIZE:
+                logger.warning("Aborting import: decompression bomb limit exceeded")
+                raise HTTPException(status_code=400, detail="Total extracted size exceeds safety limit")
             if _safe_extract(zf, arcname, project_dir):
                 dataset_count += 1
 
@@ -265,9 +312,18 @@ def import_project(
         )
         db.add(new_pt)
 
-    # Restore adapter files (safe extraction)
+    # Restore adapter files (safe extraction with extension validation)
     adapter_files = [n for n in zf.namelist() if n.startswith("adapters/") and not n.endswith("/")]
     for arcname in adapter_files:
+        ext = Path(arcname).suffix.lower()
+        if ext and ext not in _ALLOWED_EXTENSIONS:
+            logger.warning("Skipping adapter file with disallowed extension: %s", arcname)
+            continue
+        member_info = zf.getinfo(arcname)
+        extracted_bytes += member_info.file_size
+        if extracted_bytes > _MAX_DECOMPRESSED_SIZE:
+            logger.warning("Aborting import: decompression bomb limit exceeded during adapter extraction")
+            raise HTTPException(status_code=400, detail="Total extracted size exceeds safety limit")
         _safe_extract(zf, arcname, project_dir)
 
     db.commit()

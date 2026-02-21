@@ -31,12 +31,13 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-def create_token(user_id: int) -> str:
+def create_token(user_id: int, token_version: int = 0) -> str:
     now = datetime.now(timezone.utc)
     payload = {
         "user_id": user_id,
         "exp": now + timedelta(hours=JWT_EXPIRY_HOURS),
         "iat": now,
+        "tv": token_version,
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -82,6 +83,10 @@ def get_current_user(db: Session, token: str) -> User:
     user = db.query(User).filter(User.id == payload["user_id"]).first()
     if not user:
         raise ValueError("User not found")
+    # Reject tokens issued before a token_version bump (password change, logout-all)
+    token_tv = payload.get("tv", 0)
+    if token_tv < getattr(user, "token_version", 0):
+        raise ValueError("Token has been revoked — please log in again")
     return user
 
 

@@ -11,7 +11,7 @@ from slowapi.errors import RateLimitExceeded
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.database import create_tables
-from app.config import CORS_ORIGINS, LOG_LEVEL, LOG_FORMAT
+from app.config import CORS_ORIGINS, LOG_LEVEL, LOG_FORMAT, ENFORCE_HTTPS
 from app.middleware import RequestIDMiddleware, RequestIDLogFilter
 from app.logging_config import configure_logging
 
@@ -31,6 +31,15 @@ async def lifespan(app: FastAPI):
     create_tables()
     _reconcile_interrupted_tasks()
     _cleanup_stale_guests()
+
+    # Recover download/GGUF tasks that were interrupted by server restart
+    from app.routes.models import recover_interrupted_downloads
+    recover_interrupted_downloads()
+
+    # Auto-detect hardware & validate device configuration
+    from app.device_config import startup_device_check
+    startup_device_check()
+
     logger.info("MeowLLM Studio started — CORS origins: %s", CORS_ORIGINS)
     yield
     # Shutdown (cleanup goes here if needed)
@@ -175,6 +184,28 @@ async def _global_exception_handler(request: Request, exc: Exception):
     )
 
 
+# ── Request body size limit middleware ──
+_MAX_BODY_SIZE = 10 * 1024 * 1024  # 10 MB for JSON endpoints
+# Upload routes have their own limits, so we exempt them
+_UPLOAD_PATHS = {"/api/projects/import", "/api/datasets"}
+
+
+class RequestBodyLimitMiddleware(BaseHTTPMiddleware):
+    """Reject oversized request bodies to prevent DoS via huge JSON payloads."""
+    async def dispatch(self, request: Request, call_next):
+        # Skip size check for file upload endpoints (they enforce their own limits)
+        if any(request.url.path.startswith(p) for p in _UPLOAD_PATHS):
+            return await call_next(request)
+
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > _MAX_BODY_SIZE:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": f"Request body too large. Maximum size is {_MAX_BODY_SIZE // (1024*1024)} MB."},
+            )
+        return await call_next(request)
+
+
 # ── Security headers middleware ──
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add security-hardening response headers to every response."""
@@ -187,10 +218,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Cache-Control"] = "no-store"
         # CSP is light — API-only backend, no inline scripts
         response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+        # HSTS — only when explicitly enabled for production
+        if ENFORCE_HTTPS:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 
 
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestBodyLimitMiddleware)
 
 # ── CORS ──
 app.add_middleware(

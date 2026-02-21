@@ -25,4 +25,11 @@ class User(Base):
     oauth_provider = Column(String, nullable=True)  # google | github | None
     oauth_id = Column(String, nullable=True)
 
+    # JWT revocation — increment to invalidate all existing tokens
+    token_version = Column(Integer, default=0, nullable=False, server_default="0")
+
+    # Account lockout — progressive lockout after failed login attempts
+    failed_login_attempts = Column(Integer, default=0, nullable=False, server_default="0")
+    locked_until = Column(DateTime, nullable=True)
+
     projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")

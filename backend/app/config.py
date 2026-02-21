@@ -58,9 +58,17 @@ HF_TOKEN = os.getenv("HF_TOKEN", "")
 # audit every model repo you load.  Set to "true" only if needed.
 TRUST_REMOTE_CODE = os.getenv("MEOWLLM_TRUST_REMOTE_CODE", "false").lower() in ("true", "1", "yes")
 
+# ===== HTTPS Enforcement =====
+ENFORCE_HTTPS = os.getenv("MEOWLLM_ENFORCE_HTTPS", "false").lower() in ("true", "1", "yes")
+
 # ===== Rate Limiting =====
 RATE_LIMIT_AUTH = os.getenv("MEOWLLM_RATE_LIMIT_AUTH", "5/minute")
 RATE_LIMIT_INFERENCE = os.getenv("MEOWLLM_RATE_LIMIT_INFERENCE", "10/minute")
+RATE_LIMIT_PASSWORD_RESET = os.getenv("MEOWLLM_RATE_LIMIT_PASSWORD_RESET", "3/hour")
+
+# ===== Account Lockout =====
+ACCOUNT_LOCKOUT_ATTEMPTS = int(os.getenv("MEOWLLM_LOCKOUT_ATTEMPTS", "5"))
+ACCOUNT_LOCKOUT_MINUTES = int(os.getenv("MEOWLLM_LOCKOUT_MINUTES", "15"))
 
 # ===== Role / Guest Limits =====
 GUEST_MAX_PROJECTS = int(os.getenv("MEOWLLM_GUEST_MAX_PROJECTS", "3"))
@@ -92,6 +100,7 @@ OAUTH_REDIRECT_BASE = os.getenv("MEOWLLM_OAUTH_REDIRECT_BASE", "http://localhost
 FRONTEND_URL = os.getenv("MEOWLLM_FRONTEND_URL", "http://localhost:5173")
 
 # ===== Training Defaults =====
+# Base defaults — overridden at runtime by device_config.get_optimal_training_defaults()
 DEFAULT_TRAINING_CONFIG = {
     "method": "lora",
     "epochs": 3,
@@ -114,6 +123,21 @@ DEFAULT_TRAINING_CONFIG = {
     "bf16": False,   # auto-detect at runtime
     "eval_steps": 50,
 }
+
+
+def get_device_aware_training_defaults() -> dict:
+    """
+    Returns DEFAULT_TRAINING_CONFIG merged with device-specific optimizations.
+    Safe to call at any time — falls back to defaults if device_config fails.
+    """
+    merged = dict(DEFAULT_TRAINING_CONFIG)
+    try:
+        from app.device_config import get_optimal_training_defaults
+        device_defaults = get_optimal_training_defaults()
+        merged.update(device_defaults)
+    except Exception:
+        pass  # If device_config isn't ready yet, use hardcoded defaults
+    return merged
 
 # ===== Model Catalog (recommendations — any HuggingFace model can be used) =====
 MODEL_CATALOG = [

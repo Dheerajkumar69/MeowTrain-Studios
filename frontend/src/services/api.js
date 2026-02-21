@@ -69,6 +69,22 @@ api.interceptors.response.use(
             }
         }
 
+        // ── Timeout error detection ────────────────────────
+        if (error.code === 'ECONNABORTED') {
+            const now = Date.now();
+            if (!_lastNetworkEvent || now - _lastNetworkEvent > 10_000) {
+                _lastNetworkEvent = now;
+                window.dispatchEvent(new CustomEvent('meowllm:network-error', {
+                    detail: {
+                        type: 'timeout',
+                        status: 0,
+                        message: 'Request timed out. The server may be busy — please try again.',
+                    },
+                }));
+            }
+            return Promise.reject(error);
+        }
+
         // ── Network / server error detection ────────────────────────
         // Fires a custom event when the backend is unreachable or returns 502/503/504.
         // Throttled so the event fires at most once every 10 seconds.
@@ -109,6 +125,7 @@ export const authAPI = {
     forgotPassword: (email) => api.post('/auth/forgot-password', { email }),
     resetPassword: (token, new_password) => api.post('/auth/reset-password', { token, new_password }),
     deleteAccount: () => api.delete('/auth/account'),
+    logoutAll: () => api.post('/auth/logout-all'),
 };
 
 // ===== Projects =====
@@ -150,8 +167,26 @@ export const modelsAPI = {
     cancelDownload: (modelId) => api.delete(`/models/${encodeURIComponent(modelId)}/download`),
     deleteCache: (modelId) => api.delete(`/models/${encodeURIComponent(modelId)}/cache`),
     exportModel: (projectId) => api.get(`/models/export/${projectId}`, { responseType: 'blob', timeout: 300000 }),
-    // Custom model lookup
-    lookupCustom: (modelId) => api.post('/models/custom/lookup', null, { params: { model_id: modelId } }),
+    // Custom model lookup (single model by exact ID)
+    lookupCustom: (modelId) => api.post('/models/custom/lookup', null, {
+        params: { model_id: modelId },
+        timeout: 20000,  // 20s for HF API
+    }),
+    // Search HuggingFace Hub for models
+    searchHF: (query, { limit = 10, sort = 'downloads' } = {}) =>
+        api.get('/models/search', {
+            params: { q: query, limit, sort },
+            timeout: 20000,
+        }),
+    // Pre-flight check: connectivity, disk space, HF token
+    preflight: (modelId = '') => api.get('/models/preflight', {
+        params: modelId ? { model_id: modelId } : {},
+        timeout: 15000,
+    }),
+    // Deep-verify cache integrity
+    verifyCache: (modelId) => api.post(`/models/${encodeURIComponent(modelId)}/verify-cache`, null, {
+        timeout: 30000,
+    }),
     // GGUF export for LM Studio
     exportGGUF: (projectId, quantization = 'Q8_0') =>
         api.post(`/models/export/${projectId}/gguf`, null, { params: { quantization } }),
@@ -271,6 +306,8 @@ export const inferenceAPI = {
 // ===== Hardware =====
 export const hardwareAPI = {
     status: () => api.get('/hardware/'),
+    deviceInfo: () => api.get('/hardware/device'),
+    refreshDevice: () => api.post('/hardware/refresh-device'),
 };
 
 // ===== LM Studio =====

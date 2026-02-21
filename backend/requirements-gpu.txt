@@ -1,0 +1,15 @@
+# GPU-specific dependencies (NVIDIA CUDA)
+# These are installed automatically by setup.py when a CUDA GPU is detected
+
+# ── PyTorch with CUDA ───────────────────────────────────────────────
+# Installed via: pip install torch --index-url https://download.pytorch.org/whl/cu121
+# (handled by setup.py to pick the right CUDA version)
+
+# ── Quantization (QLoRA) ───────────────────────────────────────────
+bitsandbytes>=0.44.0
+
+# ── Multi-GPU Training ─────────────────────────────────────────────
+deepspeed>=0.14.0
+
+# ── GGUF Export ─────────────────────────────────────────────────────
+llama-cpp-python>=0.2.0

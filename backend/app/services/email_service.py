@@ -2,10 +2,13 @@
 Email service for verification and notifications.
 
 Uses SMTP when configured, falls back to logging tokens in dev mode.
+All user-provided data is HTML-escaped before embedding in templates
+to prevent stored XSS via email.
 """
 
 from __future__ import annotations
 
+import html
 import logging
 import smtplib
 import ssl
@@ -48,8 +51,10 @@ def send_email(to: str, subject: str, html_body: str) -> bool:
 
 def send_verification_email(to: str, token: str) -> bool:
     """Send email verification link."""
-    verify_url = f"{FRONTEND_URL}/verify-email?token={token}"
-    html = f"""
+    safe_to = html.escape(to)
+    safe_token = html.escape(token)
+    verify_url = f"{FRONTEND_URL}/verify-email?token={safe_token}"
+    body = f"""
     <h2>Welcome to MeowTrain! 🐱</h2>
     <p>Please verify your email address by clicking the link below:</p>
     <p><a href="{verify_url}" style="
@@ -67,13 +72,15 @@ def send_verification_email(to: str, token: str) -> bool:
         If you did not create this account, you can safely ignore this email.
     </p>
     """
-    return send_email(to, "Verify your MeowTrain email", html)
+    return send_email(safe_to, "Verify your MeowTrain email", body)
 
 
 def send_password_reset_email(to: str, token: str) -> bool:
     """Send password reset link."""
-    reset_url = f"{FRONTEND_URL}/reset-password?token={token}"
-    html = f"""
+    safe_to = html.escape(to)
+    safe_token = html.escape(token)
+    reset_url = f"{FRONTEND_URL}/reset-password?token={safe_token}"
+    body = f"""
     <h2>Password Reset 🔒</h2>
     <p>A password reset was requested for your MeowTrain account.</p>
     <p><a href="{reset_url}" style="
@@ -91,4 +98,4 @@ def send_password_reset_email(to: str, token: str) -> bool:
         If you did not request this reset, you can safely ignore this email.
     </p>
     """
-    return send_email(to, "MeowTrain Password Reset", html)
+    return send_email(safe_to, "MeowTrain Password Reset", body)

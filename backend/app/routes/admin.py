@@ -30,6 +30,7 @@ from app.models.model_config import ModelConfig
 from app.models.training_run import TrainingRun
 from app.models.background_task import BackgroundTask
 from app.services.auth_service import get_user_from_header, require_role
+from app.services.audit import audit as security_audit
 from app.config import PROJECTS_DIR, MODEL_CACHE_DIR
 
 logger = logging.getLogger("meowllm.routes.admin")
@@ -68,9 +69,11 @@ def list_users(
     query = db.query(User)
 
     if search:
-        search_term = f"%{search}%"
+        # Escape SQL LIKE special characters to prevent pattern injection
+        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        search_term = f"%{escaped}%"
         query = query.filter(
-            (User.email.ilike(search_term)) | (User.display_name.ilike(search_term))
+            (User.email.ilike(search_term, escape="\\")) | (User.display_name.ilike(search_term, escape="\\"))
         )
 
     if role:
@@ -146,6 +149,7 @@ def delete_user(
     db.commit()
 
     logger.info("Admin %d deleted user %d (%s)", admin.id, user_id, target.email or "guest")
+    security_audit("admin_delete_user", user_id=admin.id, detail=f"Deleted user {user_id} ({target.email or 'guest'})")
     return {"detail": f"User {user_id} and all associated data deleted"}
 
 
@@ -172,6 +176,7 @@ def update_user_role(
     db.commit()
 
     logger.info("Admin %d changed user %d role: %s → %s", admin.id, user_id, old_role, role)
+    security_audit("admin_change_role", user_id=admin.id, detail=f"Changed user {user_id} role: {old_role} → {role}")
     return {"detail": f"User {user_id} role changed from {old_role} to {role}"}
 
 

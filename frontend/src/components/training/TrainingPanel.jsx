@@ -43,6 +43,7 @@ export default function TrainingPanel({ projectId, selectedModel, datasets, proj
     const [training, setTraining] = useState(false);
     const [status, setStatus] = useState(null);
     const [hardware, setHardware] = useState(null);
+    const [deviceInfo, setDeviceInfo] = useState(null);
     const [lossHistory, setLossHistory] = useState([]);
     const [error, setError] = useState('');
     const [wsError, setWsError] = useState(false);
@@ -51,8 +52,37 @@ export default function TrainingPanel({ projectId, selectedModel, datasets, proj
 
     const wsRef = useRef(null);
     const hwPollRef = useRef(null);
+    const defaultsAppliedRef = useRef(false);
 
     const readyDatasets = datasets?.filter((d) => d.status === 'ready') || [];
+
+    // ── Fetch device-recommended defaults on mount ──────────────
+    useEffect(() => {
+        let cancelled = false;
+        const fetchDefaults = async () => {
+            try {
+                const res = await hardwareAPI.deviceInfo();
+                if (cancelled) return;
+                setDeviceInfo(res.data);
+                // Merge recommended defaults into config only once
+                if (!defaultsAppliedRef.current && res.data?.recommended_defaults) {
+                    const rec = res.data.recommended_defaults;
+                    defaultsAppliedRef.current = true;
+                    setConfig(prev => ({
+                        ...prev,
+                        ...(rec.batch_size != null && { batch_size: rec.batch_size }),
+                        ...(rec.max_tokens != null && { max_tokens: rec.max_tokens }),
+                        ...(rec.gradient_accumulation_steps != null && { gradient_accumulation_steps: rec.gradient_accumulation_steps }),
+                        ...(rec.gradient_checkpointing != null && { gradient_checkpointing: rec.gradient_checkpointing }),
+                        ...(rec.method && { method: rec.method }),
+                        // fp16/bf16 are internal — not exposed in config form
+                    }));
+                }
+            } catch { /* device endpoint might not be available — use defaults */ }
+        };
+        fetchDefaults();
+        return () => { cancelled = true; };
+    }, []);
 
     // ── Restore active training state on mount ──────────────────
     useEffect(() => {
@@ -199,6 +229,7 @@ export default function TrainingPanel({ projectId, selectedModel, datasets, proj
                 selectedModel={selectedModel}
                 readyDatasets={readyDatasets}
                 hardware={hardware}
+                deviceInfo={deviceInfo}
                 projectId={projectId}
                 error={error}
                 setError={setError}

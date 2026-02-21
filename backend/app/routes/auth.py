@@ -1,5 +1,8 @@
 import re
 import secrets
+import hashlib
+import hmac
+import html as _html
 import logging
 from datetime import datetime, timezone, timedelta
 
@@ -27,11 +30,14 @@ from app.schemas import (
 )
 from app.services.auth_service import hash_password, verify_password, create_token, get_current_user, get_user_from_header, decode_token_allow_expired
 from app.services.email_service import send_verification_email, send_password_reset_email
+from app.services.audit import audit as security_audit
 from app.config import (
     RATE_LIMIT_AUTH, PROJECTS_DIR,
     OAUTH_GOOGLE_CLIENT_ID, OAUTH_GOOGLE_CLIENT_SECRET,
     OAUTH_GITHUB_CLIENT_ID, OAUTH_GITHUB_CLIENT_SECRET,
     OAUTH_REDIRECT_BASE, SMTP_ENABLED,
+    RATE_LIMIT_PASSWORD_RESET,
+    ACCOUNT_LOCKOUT_ATTEMPTS, ACCOUNT_LOCKOUT_MINUTES,
 )
 
 logger = logging.getLogger("meowllm.routes.auth")
@@ -44,6 +50,26 @@ _limiter = Limiter(key_func=get_remote_address)
 # Limits to prevent abuse
 _MAX_GUEST_ACCOUNTS_PER_HOUR = 10  # per IP via rate limiter
 _MAX_DISPLAY_NAME_LENGTH = 100
+
+# Allowed characters in display names (strip HTML tags)
+_DISPLAY_NAME_RE = re.compile(r"<[^>]+>")
+
+
+def _generate_oauth_state() -> str:
+    """Generate a cryptographically random state token for OAuth CSRF protection."""
+    return secrets.token_urlsafe(32)
+
+
+def _sign_state(state: str) -> str:
+    """Create an HMAC signature of the state token using JWT_SECRET."""
+    from app.config import JWT_SECRET
+    return hmac.new(JWT_SECRET.encode(), state.encode(), hashlib.sha256).hexdigest()
+
+
+def _verify_oauth_state(state: str, signature: str) -> bool:
+    """Verify the HMAC signature of an OAuth state token."""
+    expected = _sign_state(state)
+    return hmac.compare_digest(expected, signature)
 
 
 def _validate_password(password: str):
@@ -78,16 +104,23 @@ def register(request: Request, req: RegisterRequest, db: Session = Depends(get_d
     # Generate email verification token
     verification_token = secrets.token_urlsafe(48)
 
+    # Sanitize display name — strip HTML tags
+    safe_display = _DISPLAY_NAME_RE.sub("", req.display_name).strip()[:_MAX_DISPLAY_NAME_LENGTH]
+    if not safe_display:
+        safe_display = "User"
+
     user = User(
         email=normalized_email,
         password_hash=hash_password(req.password),
-        display_name=req.display_name.strip()[:_MAX_DISPLAY_NAME_LENGTH],
+        display_name=safe_display,
         email_verified=False,
         email_verification_token=verification_token,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
+
+    security_audit("register", user_id=user.id, email=normalized_email, ip=request.client.host)
 
     # Send verification email (non-blocking — failure doesn't prevent registration)
     email_sent = send_verification_email(normalized_email, verification_token)
@@ -97,7 +130,7 @@ def register(request: Request, req: RegisterRequest, db: Session = Depends(get_d
             normalized_email, verification_token,
         )
 
-    token = create_token(user.id)
+    token = create_token(user.id, user.token_version)
     return AuthResponse(token=token, user=UserResponse.model_validate(user))
 
 
@@ -106,10 +139,42 @@ def register(request: Request, req: RegisterRequest, db: Session = Depends(get_d
 def login(request: Request, req: LoginRequest, db: Session = Depends(get_db)):
     normalized_email = _normalize_email(req.email)
     user = db.query(User).filter(User.email == normalized_email).first()
+
+    # Account lockout check
+    if user and user.locked_until:
+        # SQLite stores naive datetimes — compare consistently
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if user.locked_until > now:
+            remaining = int((user.locked_until - now).total_seconds() / 60) + 1
+            security_audit("login_locked", email=normalized_email, ip=request.client.host,
+                           detail=f"Account still locked for ~{remaining} min")
+            raise HTTPException(
+                status_code=429,
+                detail=f"Account temporarily locked due to too many failed attempts. "
+                       f"Try again in {remaining} minute(s).",
+            )
+
     # Use generic error message to prevent user enumeration
     if not user or not verify_password(req.password, user.password_hash or ""):
+        # Track failed attempts for lockout
+        if user:
+            user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
+            if user.failed_login_attempts >= ACCOUNT_LOCKOUT_ATTEMPTS:
+                user.locked_until = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=ACCOUNT_LOCKOUT_MINUTES)
+                security_audit("account_locked", user_id=user.id, email=normalized_email,
+                               ip=request.client.host,
+                               detail=f"Locked for {ACCOUNT_LOCKOUT_MINUTES}m after {user.failed_login_attempts} failures")
+            db.commit()
+        security_audit("login_failed", email=normalized_email, ip=request.client.host)
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    token = create_token(user.id)
+
+    # Successful login — reset lockout counters
+    user.failed_login_attempts = 0
+    user.locked_until = None
+    db.commit()
+
+    security_audit("login_success", user_id=user.id, email=normalized_email, ip=request.client.host)
+    token = create_token(user.id, user.token_version)
     return AuthResponse(token=token, user=UserResponse.model_validate(user))
 
 
@@ -124,7 +189,7 @@ def guest_login(request: Request, db: Session = Depends(get_db)):
     db.add(guest)
     db.commit()
     db.refresh(guest)
-    token = create_token(guest.id)
+    token = create_token(guest.id, guest.token_version)
     return AuthResponse(token=token, user=UserResponse.model_validate(guest))
 
 
@@ -158,7 +223,10 @@ def update_profile(
         if key not in _ALLOWED_PROFILE_FIELDS:
             continue
         if isinstance(value, str):
-            value = value.strip()[:_MAX_DISPLAY_NAME_LENGTH]
+            # Strip HTML tags and trim
+            value = _DISPLAY_NAME_RE.sub("", value).strip()[:_MAX_DISPLAY_NAME_LENGTH]
+            if not value:
+                continue  # skip empty after sanitization
         setattr(user, key, value)
 
     db.commit()
@@ -168,6 +236,7 @@ def update_profile(
 
 @router.post("/password")
 def change_password(
+    request: Request,
     req: PasswordChangeRequest,
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db),
@@ -194,7 +263,11 @@ def change_password(
     _validate_password(req.new_password)
 
     user.password_hash = hash_password(req.new_password)
+    # Revoke all existing tokens by bumping version
+    user.token_version = (user.token_version or 0) + 1
     db.commit()
+
+    security_audit("password_changed", user_id=user.id, email=user.email, ip=request.client.host if hasattr(request, 'client') else None)
     return {"detail": "Password changed successfully"}
 
 
@@ -215,20 +288,64 @@ def refresh_token(request: Request, authorization: Optional[str] = Header(None),
     if not user:
         raise HTTPException(status_code=401, detail="User no longer exists")
 
-    new_token = create_token(user.id)
+    new_token = create_token(user.id, user.token_version)
     return AuthResponse(token=new_token, user=UserResponse.model_validate(user))
 
 
-@router.delete("/account", response_model=DetailResponse)
-def delete_account(
+@router.post("/logout-all", response_model=DetailResponse)
+def logout_all(
+    request: Request,
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
-    """Permanently delete the authenticated user's account and all related data."""
+    """Revoke ALL existing tokens for this user by bumping token_version."""
     try:
         user = get_user_from_header(db, authorization)
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
+
+    user.token_version = (user.token_version or 0) + 1
+    db.commit()
+
+    security_audit("logout_all", user_id=user.id, email=user.email, ip=request.client.host)
+    return {"detail": "All sessions have been revoked. Please log in again."}
+
+
+@router.delete("/account", response_model=DetailResponse)
+def delete_account(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    """Permanently delete the authenticated user's account and all related data.
+
+    Non-guest, non-OAuth users must provide their current password in the
+    request body as {"password": "..."} to confirm deletion.
+    """
+    try:
+        user = get_user_from_header(db, authorization)
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+    # Require password confirmation for registered (non-guest, non-OAuth) accounts
+    if not user.is_guest and user.password_hash:
+        try:
+            import json as _json
+            body = _json.loads(request._body.decode()) if hasattr(request, '_body') else {}
+        except Exception:
+            body = {}
+        # Also check query param as fallback for DELETE body support
+        password = body.get("password", "")
+        if not password:
+            raise HTTPException(
+                status_code=400,
+                detail="Password confirmation required to delete your account.",
+            )
+        if not verify_password(password, user.password_hash):
+            raise HTTPException(
+                status_code=403,
+                detail="Incorrect password. Account deletion cancelled.",
+            )
 
     # Get all projects owned by this user for filesystem cleanup
     projects = db.query(Project).filter(Project.user_id == user.id).all()
@@ -261,12 +378,13 @@ def delete_account(
     db.delete(user)
     db.commit()
 
+    security_audit("account_deleted", user_id=user.id, email=user.email, ip=request.client.host)
     logger.info("Deleted account for user %d (%s)", user.id, user.email or "guest")
     return {"detail": "Account and all associated data permanently deleted"}
 
 
 @router.post("/forgot-password", response_model=DetailResponse)
-@_limiter.limit(RATE_LIMIT_AUTH)
+@_limiter.limit(RATE_LIMIT_PASSWORD_RESET)
 def forgot_password(
     request: Request,
     req: ForgotPasswordRequest,
@@ -414,6 +532,10 @@ def oauth_google_redirect():
     if not OAUTH_GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=501, detail="Google OAuth not configured")
 
+    # Generate CSRF state token
+    state = _generate_oauth_state()
+    state_sig = _sign_state(state)
+
     redirect_uri = f"{OAUTH_REDIRECT_BASE}/api/auth/oauth/google/callback"
     params = {
         "client_id": OAUTH_GOOGLE_CLIENT_ID,
@@ -422,19 +544,36 @@ def oauth_google_redirect():
         "scope": "openid email profile",
         "access_type": "offline",
         "prompt": "consent",
+        "state": state,
     }
     url = f"{_GOOGLE_AUTH_URL}?" + "&".join(f"{k}={v}" for k, v in params.items())
-    return RedirectResponse(url=url)
+    response = RedirectResponse(url=url)
+    # Store state signature in a secure cookie for verification on callback
+    response.set_cookie(
+        key="oauth_state_sig",
+        value=state_sig,
+        max_age=600,  # 10 minutes
+        httponly=True,
+        samesite="lax",
+    )
+    return response
 
 
 @router.get("/oauth/google/callback")
 def oauth_google_callback(
+    request: Request,
     code: str = Query(...),
+    state: str = Query(""),
     db: Session = Depends(get_db),
 ):
     """Handle Google OAuth callback, create or log in user."""
     if not OAUTH_GOOGLE_CLIENT_ID or not OAUTH_GOOGLE_CLIENT_SECRET:
         raise HTTPException(status_code=501, detail="Google OAuth not configured")
+
+    # Verify CSRF state token
+    state_sig = request.cookies.get("oauth_state_sig", "")
+    if not state or not state_sig or not _verify_oauth_state(state, state_sig):
+        raise HTTPException(status_code=400, detail="Invalid OAuth state — possible CSRF attack. Please try again.")
 
     redirect_uri = f"{OAUTH_REDIRECT_BASE}/api/auth/oauth/google/callback"
 
@@ -500,10 +639,13 @@ def oauth_google_callback(
     logger.info("Google OAuth login for user %d (%s)", user.id, email)
 
     # Redirect to frontend with token
-    return RedirectResponse(
+    response = RedirectResponse(
         url=f"{OAUTH_REDIRECT_BASE}/oauth/callback?token={jwt_token}",
         status_code=302,
     )
+    # Clear the CSRF state cookie
+    response.delete_cookie("oauth_state_sig")
+    return response
 
 
 # ─────────────────────────────────────────────────────
@@ -522,24 +664,44 @@ def oauth_github_redirect():
     if not OAUTH_GITHUB_CLIENT_ID:
         raise HTTPException(status_code=501, detail="GitHub OAuth not configured")
 
+    # Generate CSRF state token
+    state = _generate_oauth_state()
+    state_sig = _sign_state(state)
+
     redirect_uri = f"{OAUTH_REDIRECT_BASE}/api/auth/oauth/github/callback"
     params = {
         "client_id": OAUTH_GITHUB_CLIENT_ID,
         "redirect_uri": redirect_uri,
         "scope": "user:email",
+        "state": state,
     }
     url = f"{_GITHUB_AUTH_URL}?" + "&".join(f"{k}={v}" for k, v in params.items())
-    return RedirectResponse(url=url)
+    response = RedirectResponse(url=url)
+    response.set_cookie(
+        key="oauth_state_sig",
+        value=state_sig,
+        max_age=600,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
 
 
 @router.get("/oauth/github/callback")
 def oauth_github_callback(
+    request: Request,
     code: str = Query(...),
+    state: str = Query(""),
     db: Session = Depends(get_db),
 ):
     """Handle GitHub OAuth callback, create or log in user."""
     if not OAUTH_GITHUB_CLIENT_ID or not OAUTH_GITHUB_CLIENT_SECRET:
         raise HTTPException(status_code=501, detail="GitHub OAuth not configured")
+
+    # Verify CSRF state token
+    state_sig = request.cookies.get("oauth_state_sig", "")
+    if not state or not state_sig or not _verify_oauth_state(state, state_sig):
+        raise HTTPException(status_code=400, detail="Invalid OAuth state — possible CSRF attack. Please try again.")
 
     # Exchange code for access token
     try:
@@ -617,7 +779,9 @@ def oauth_github_callback(
     jwt_token = create_token(user.id)
     logger.info("GitHub OAuth login for user %d (%s)", user.id, email or github_id)
 
-    return RedirectResponse(
+    response = RedirectResponse(
         url=f"{OAUTH_REDIRECT_BASE}/oauth/callback?token={jwt_token}",
         status_code=302,
     )
+    response.delete_cookie("oauth_state_sig")
+    return response

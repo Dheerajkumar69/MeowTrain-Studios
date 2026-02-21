@@ -1,3 +1,15 @@
+# ──────────────────────────────────────────────────────────────────────
+# MeowTrain — Legacy requirements.txt
+#
+# ⭐ RECOMMENDED: Use `python setup.py` from the project root instead!
+#    It auto-detects your CPU/GPU and installs the right PyTorch build.
+#
+# This file installs EVERYTHING (including GPU packages) which may fail
+# on CPU-only machines. For selective installs, see:
+#   - requirements-base.txt   (core packages, no PyTorch)
+#   - requirements-gpu.txt    (NVIDIA GPU extras)
+#   - requirements-cpu.txt    (CPU-only extras)
+# ──────────────────────────────────────────────────────────────────────
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 sqlalchemy>=2.0.0

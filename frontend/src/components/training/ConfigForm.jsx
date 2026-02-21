@@ -38,7 +38,7 @@ function Tip({ text }) {
 }
 
 export default function ConfigForm({
-    config, setConfig, selectedModel, readyDatasets, hardware,
+    config, setConfig, selectedModel, readyDatasets, hardware, deviceInfo,
     projectId, error, setError, actionPending, onStartTraining,
 }) {
     const toast = useToast();
@@ -51,7 +51,20 @@ export default function ConfigForm({
         <div className="space-y-6 animate-fade-in">
             <div>
                 <h2 className="text-xl font-bold text-surface-900">Training Configuration</h2>
-                <p className="text-sm text-surface-500 mt-1">Adjust how your model learns. Safe defaults are pre-selected.</p>
+                <p className="text-sm text-surface-500 mt-1">
+                    Adjust how your model learns. Safe defaults are pre-selected.
+                    {deviceInfo && (
+                        <span className={`ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
+                            deviceInfo.training_device === 'cuda' ? 'bg-green-100 text-green-700' :
+                            deviceInfo.training_device === 'mps' ? 'bg-purple-100 text-purple-700' :
+                            'bg-yellow-100 text-yellow-700'
+                        }`}>
+                            <Cpu className="w-3 h-3" />
+                            {deviceInfo.training_device === 'cuda' ? `GPU · ${deviceInfo.gpu_name?.replace('NVIDIA ', '') || 'CUDA'}` :
+                             deviceInfo.training_device === 'mps' ? 'Apple Silicon' : 'CPU Mode'}
+                        </span>
+                    )}
+                </p>
             </div>
 
             {error && (

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { projectsAPI, hardwareAPI } from '../services/api';
+import { projectsAPI, hardwareAPI, authAPI } from '../services/api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { DashboardSkeleton, EmptyProjects } from '../components/Skeletons';
@@ -9,7 +9,7 @@ import {
     Cat, Plus, FolderOpen, Cpu, MemoryStick, HardDrive,
     LogOut, Search, Bot, Code, MessageCircle, Wand2, Trash2,
     Clock, Database, ChevronRight, Sparkles, Settings,
-    Thermometer, Flame, Activity, Gauge
+    Thermometer, Flame, Activity, Gauge, ShieldOff
 } from 'lucide-react';
 
 const USE_ICONS = { chatbot: <Bot className="w-5 h-5" />, code: <Code className="w-5 h-5" />, qa: <MessageCircle className="w-5 h-5" />, custom: <Wand2 className="w-5 h-5" /> };
@@ -42,6 +42,7 @@ export default function DashboardPage() {
     const [hwError, setHwError] = useState(false);
     const hwPollRef = useRef(null);
     const [deleteTarget, setDeleteTarget] = useState(null);
+    const [showRevokeConfirm, setShowRevokeConfirm] = useState(false);
 
     // New project form
     const [newName, setNewName] = useState('');
@@ -115,6 +116,16 @@ export default function DashboardPage() {
 
     const filtered = projects.filter((p) => p.name?.toLowerCase().includes(search.toLowerCase()));
 
+    const revokeAllSessions = async () => {
+        try {
+            await authAPI.logoutAll();
+            toast.success('All sessions revoked. Logging out…');
+            setTimeout(() => logout(), 1000);
+        } catch (err) {
+            toast.error(err.response?.data?.detail || 'Failed to revoke sessions');
+        }
+    };
+
     return (
         <div className="min-h-screen bg-surface-50 flex flex-col md:flex-row">
             {/* Skip link */}
@@ -182,6 +193,9 @@ export default function DashboardPage() {
                     </div>
                     <button onClick={logout} className="text-surface-400 hover:text-danger-500 transition-colors focus:outline-none focus:ring-2 focus:ring-danger-500/50 rounded" aria-label="Sign out">
                         <LogOut className="w-4 h-4" aria-hidden="true" />
+                    </button>
+                    <button onClick={() => setShowRevokeConfirm(true)} className="text-surface-400 hover:text-amber-500 transition-colors focus:outline-none focus:ring-2 focus:ring-amber-500/50 rounded" aria-label="Revoke all sessions" title="Revoke all sessions">
+                        <ShieldOff className="w-4 h-4" aria-hidden="true" />
                     </button>
                 </div>
             </aside>
@@ -489,6 +503,17 @@ export default function DashboardPage() {
                 variant="danger"
                 onConfirm={confirmDelete}
                 onCancel={() => setDeleteTarget(null)}
+            />
+
+            {/* Revoke All Sessions Confirm */}
+            <ConfirmDialog
+                open={showRevokeConfirm}
+                title="Revoke All Sessions"
+                message="This will sign you out of all devices and browsers. You will need to log in again everywhere."
+                confirmLabel="Revoke All"
+                variant="danger"
+                onConfirm={() => { setShowRevokeConfirm(false); revokeAllSessions(); }}
+                onCancel={() => setShowRevokeConfirm(false)}
             />
         </div>
     );

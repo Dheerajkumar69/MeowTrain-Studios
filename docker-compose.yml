@@ -5,6 +5,12 @@ services:
       - "8000:8000"
     env_file:
       - ./backend/.env
+    environment:
+      # Security hardening — uncomment & adjust for production
+      # MEOWLLM_ENFORCE_HTTPS: "true"
+      # MEOWLLM_ACCOUNT_LOCKOUT_ATTEMPTS: "5"
+      # MEOWLLM_ACCOUNT_LOCKOUT_MINUTES: "15"
+      # MEOWLLM_RATE_LIMIT_PASSWORD_RESET: "3/hour"
     volumes:
       - meowllm-data:/app/data
       - huggingface-cache:/root/.cache/huggingface

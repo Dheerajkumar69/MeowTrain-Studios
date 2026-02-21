@@ -83,7 +83,9 @@ def list_projects(
 
     # ── Search by name ──
     if search:
-        base_query = base_query.filter(Project.name.ilike(f"%{search}%"))
+        # Escape SQL LIKE special characters to prevent pattern injection
+        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        base_query = base_query.filter(Project.name.ilike(f"%{escaped}%", escape="\\"))
 
     # ── Filter by status ──
     if status:

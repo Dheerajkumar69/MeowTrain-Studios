@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 from typing import Literal, Optional
 from datetime import datetime
 
@@ -160,6 +160,17 @@ class TrainingConfigRequest(BaseModel):
     deepspeed_stage: Literal[2, 3] = Field(default=2, description="DeepSpeed ZeRO stage")
     # Resume from checkpoint
     resume_from_checkpoint: bool = Field(default=False, description="Resume training from latest checkpoint")
+
+    @model_validator(mode="after")
+    def _cross_field_checks(self):
+        """Validate hyperparameter combinations that individual field constraints cannot catch."""
+        # LoRA alpha should be >= rank (standard best practice; alpha < rank degrades performance)
+        if self.method in ("lora", "qlora") and self.lora_alpha < self.lora_rank:
+            raise ValueError(
+                f"lora_alpha ({self.lora_alpha}) should be >= lora_rank ({self.lora_rank}). "
+                f"A common default is alpha = 2 × rank."
+            )
+        return self
 
 
 class TrainingStatusResponse(BaseModel):

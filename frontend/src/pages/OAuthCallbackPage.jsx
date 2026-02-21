@@ -29,6 +29,20 @@ export default function OAuthCallbackPage() {
             return;
         }
 
+        // Validate that the token looks like a JWT (header.payload.signature)
+        const jwtParts = token.split('.');
+        if (jwtParts.length !== 3 || jwtParts.some(part => part.length === 0)) {
+            setError('Invalid authentication token received. Please try logging in again.');
+            return;
+        }
+
+        // Verify each segment is valid Base64url
+        const isBase64url = (s) => /^[A-Za-z0-9_-]+$/.test(s);
+        if (!jwtParts.every(isBase64url)) {
+            setError('Malformed authentication token. Please try logging in again.');
+            return;
+        }
+
         // Store token and redirect
         localStorage.setItem('meowllm_token', token);
         refreshUser().then(() => {

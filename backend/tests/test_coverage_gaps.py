@@ -43,16 +43,16 @@ class TestHealth:
 # ──────────────────────────────────────────────────────────────
 
 class TestHardwareEndpoint:
-    def test_hardware_status(self, client):
-        resp = client.get("/api/hardware/")
+    def test_hardware_status(self, client, auth_headers):
+        resp = client.get("/api/hardware/", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert "cpu_name" in data
         assert "ram_total_gb" in data
         assert isinstance(data["gpu_available"], bool)
 
-    def test_hardware_returns_numeric_values(self, client):
-        data = client.get("/api/hardware/").json()
+    def test_hardware_returns_numeric_values(self, client, auth_headers):
+        data = client.get("/api/hardware/", headers=auth_headers).json()
         assert isinstance(data["cpu_cores"], int)
         assert isinstance(data["ram_total_gb"], (int, float))
         assert isinstance(data["disk_total_gb"], (int, float))

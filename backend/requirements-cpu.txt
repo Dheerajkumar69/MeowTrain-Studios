@@ -1,0 +1,9 @@
+# CPU-only dependencies
+# These are installed automatically by setup.py when no CUDA GPU is detected
+
+# ── PyTorch CPU-only ────────────────────────────────────────────────
+# Installed via: pip install torch --index-url https://download.pytorch.org/whl/cpu
+# (handled by setup.py — much smaller download than CUDA version)
+
+# ── GGUF Export (CPU build) ─────────────────────────────────────────
+llama-cpp-python>=0.2.0
