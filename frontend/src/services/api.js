@@ -270,7 +270,8 @@ export const inferenceAPI = {
                                 } else if (currentEvent === 'error') {
                                     onError?.(new Error(parsed.detail || 'Stream error'));
                                 }
-                            } catch {
+                            } catch (parseErr) {
+                                console.debug('SSE parse skip:', parseErr.message);
                                 // ignore malformed JSON chunks
                             }
                             currentEvent = '';
@@ -285,7 +286,7 @@ export const inferenceAPI = {
                         try {
                             const parsed = JSON.parse(remaining.slice(5).trim());
                             if (parsed.text != null) onToken(parsed.text);
-                        } catch { /* ignore */ }
+                        } catch (flushErr) { console.debug('SSE flush parse:', flushErr.message); }
                     }
                 }
 

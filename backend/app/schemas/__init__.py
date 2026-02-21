@@ -12,6 +12,20 @@ class RegisterRequest(BaseModel):
     password: str = Field(..., min_length=8, max_length=128)
     display_name: str = Field(default="User", min_length=1, max_length=100)
 
+    @field_validator("password")
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        """Enforce strong passwords: uppercase, lowercase, digit, special char."""
+        if not any(c.isupper() for c in v):
+            raise ValueError("Password must contain at least one uppercase letter")
+        if not any(c.islower() for c in v):
+            raise ValueError("Password must contain at least one lowercase letter")
+        if not any(c.isdigit() for c in v):
+            raise ValueError("Password must contain at least one digit")
+        if not any(c in "!@#$%^&*()_+-=[]{}|;':\",./<>?`~" for c in v):
+            raise ValueError("Password must contain at least one special character (!@#$%^&*...)")
+        return v
+
     @field_validator("display_name")
     @classmethod
     def sanitize_display_name(cls, v: str) -> str:
@@ -303,9 +317,30 @@ class ProfileUpdateRequest(BaseModel):
         return v
 
 
+import re
+
+_PASSWORD_STRENGTH_CHECKS = [
+    (lambda v: any(c.isupper() for c in v), "Password must contain at least one uppercase letter"),
+    (lambda v: any(c.islower() for c in v), "Password must contain at least one lowercase letter"),
+    (lambda v: any(c.isdigit() for c in v), "Password must contain at least one digit"),
+    (lambda v: bool(re.search(r"[!@#$%^&*()_+\-=\[\]{}|;':"",./<>?`~]", v)), "Password must contain at least one special character"),
+]
+
+def _validate_password(v: str) -> str:
+    for check_fn, msg in _PASSWORD_STRENGTH_CHECKS:
+        if not check_fn(v):
+            raise ValueError(msg)
+    return v
+
+
 class PasswordChangeRequest(BaseModel):
     current_password: str = Field(..., min_length=1, max_length=128)
     new_password: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: str) -> str:
+        return _validate_password(v)
 
 
 # ===== Generic Responses =====
@@ -348,6 +383,11 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     token: str = Field(..., min_length=1, max_length=512)
     new_password: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: str) -> str:
+        return _validate_password(v)
 
 
 # ===== Training History & Compare =====

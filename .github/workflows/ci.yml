@@ -59,7 +59,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install -r requirements-base.txt
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install pytest pytest-asyncio httpx pytest-cov
 
       - name: Run tests with coverage
@@ -140,7 +141,9 @@ jobs:
 
       - name: Install backend
         working-directory: backend
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements-base.txt
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install frontend + Playwright
         working-directory: frontend
@@ -148,22 +151,10 @@ jobs:
           npm ci
           npx playwright install --with-deps chromium
 
-      - name: Start backend
-        working-directory: backend
-        env:
-          MEOWLLM_JWT_SECRET: ci-e2e-secret-key-not-for-prod
-        run: |
-          python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 &
-          sleep 5
-
-      - name: Start frontend dev server
-        working-directory: frontend
-        run: |
-          npm run dev -- --host 0.0.0.0 --port 5173 &
-          sleep 5
-
       - name: Run Playwright E2E tests
         working-directory: frontend
+        env:
+          MEOWLLM_JWT_SECRET: ci-e2e-secret-key-not-for-prod
         run: npx playwright test --reporter=html
 
       - name: Upload Playwright report

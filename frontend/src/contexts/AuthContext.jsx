@@ -70,8 +70,8 @@ export function AuthProvider({ children }) {
         try {
             const res = await authAPI.me();
             setUser(res.data);
-        } catch {
-            // silent — caller handles error
+        } catch (err) {
+            console.debug('User refresh failed:', err.message || err);
         }
     }, []);
 

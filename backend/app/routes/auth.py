@@ -78,10 +78,14 @@ def _validate_password(password: str):
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters long.")
     if len(password) > 128:
         raise HTTPException(status_code=400, detail="Password must be at most 128 characters long.")
+    if not re.search(r"[A-Z]", password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one uppercase letter.")
+    if not re.search(r"[a-z]", password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one lowercase letter.")
     if not re.search(r"\d", password):
         raise HTTPException(status_code=400, detail="Password must contain at least one digit.")
-    if not re.search(r"[a-zA-Z]", password):
-        raise HTTPException(status_code=400, detail="Password must contain at least one letter.")
+    if not re.search(r"[!@#$%^&*()_+\-=\[\]{}|;':\",./<>?`~]", password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one special character.")
 
 
 def _normalize_email(email: str) -> str:
@@ -175,7 +179,33 @@ def login(request: Request, req: LoginRequest, db: Session = Depends(get_db)):
 
     security_audit("login_success", user_id=user.id, email=normalized_email, ip=request.client.host)
     token = create_token(user.id, user.token_version)
-    return AuthResponse(token=token, user=UserResponse.model_validate(user))
+
+    # Check if user's password meets current strength requirements
+    # (existing users may have weak passwords from before the policy was added)
+    password_weak = False
+    try:
+        _validate_password(req.password)
+    except HTTPException:
+        password_weak = True
+
+    response = AuthResponse(token=token, user=UserResponse.model_validate(user))
+    result = response.model_dump()
+    if password_weak:
+        result["password_weak"] = True
+        result["password_message"] = (
+            "Your password doesn't meet our updated security requirements. "
+            "Please change it in your profile settings."
+        )
+
+    # Email verification enforcement — warn unverified users
+    if user.email and not user.is_guest and not user.email_verified:
+        result["email_unverified"] = True
+        result["email_message"] = (
+            "Your email address has not been verified. "
+            "Please check your inbox or request a new verification link."
+        )
+
+    return result
 
 
 @router.post("/guest", response_model=AuthResponse)
@@ -332,7 +362,8 @@ def delete_account(
         try:
             import json as _json
             body = _json.loads(request._body.decode()) if hasattr(request, '_body') else {}
-        except Exception:
+        except Exception as e:
+            logger.debug("Failed to parse request body for delete confirmation: %s", e)
             body = {}
         # Also check query param as fallback for DELETE body support
         password = body.get("password", "")
@@ -743,8 +774,8 @@ def oauth_github_callback(
             primary = next((e for e in emails if e.get("primary")), None)
             if primary:
                 email = primary.get("email", "")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("GitHub email fetch failed (non-critical): %s", e)
 
     email = email.strip().lower() if email else ""
 

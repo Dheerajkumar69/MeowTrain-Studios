@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from sqlalchemy.orm import Session
 from typing import Optional
+import logging
 import time
 
 from slowapi import Limiter
@@ -14,6 +15,8 @@ from app.schemas import ChatRequest, ChatResponse, PromptTemplateCreate, PromptT
 from app.services.auth_service import get_user_from_header
 from app.config import RATE_LIMIT_INFERENCE
 from app.dependencies import get_project_for_user
+
+logger = logging.getLogger("meowllm.routes.inference")
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["Inference"])
 
@@ -151,8 +154,8 @@ def get_context(
     try:
         from app.services.inference_service import get_model_info
         model_info = get_model_info(project.id)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Best-effort model info fetch failed for project %d: %s", project_id, e)
 
     return {
         "datasets": [

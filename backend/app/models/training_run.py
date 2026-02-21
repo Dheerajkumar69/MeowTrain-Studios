@@ -28,5 +28,9 @@ class TrainingRun(Base):
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
 
+    # Persisted worker PID — enables orphan detection after server restart
+    worker_pid = Column(Integer, nullable=True)
+
     project = relationship("Project", back_populates="training_runs")
     model_config = relationship("ModelConfig", back_populates="training_runs")
+

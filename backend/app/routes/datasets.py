@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 import os
 import re
+import logging
 import shutil
 import uuid
 from pathlib import Path
@@ -18,6 +19,8 @@ from app.services.auth_service import get_user_from_header
 from app.config import PROJECTS_DIR, ALLOWED_EXTENSIONS, MAX_UPLOAD_SIZE_MB, RATE_LIMIT_UPLOAD
 from app.utils.text_extractor import extract_text
 from app.dependencies import get_project_for_user
+
+logger = logging.getLogger("meowllm.datasets")
 
 try:
     import tiktoken
@@ -92,15 +95,15 @@ async def upload_dataset(
         # Clean up partial file on size violation
         try:
             file_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Cleanup of partial upload failed: %s", e)
         raise
 
     if file_size == 0:
         try:
             file_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Cleanup of empty upload failed: %s", e)
         raise HTTPException(status_code=400, detail="File is empty.")
 
     # Extract text and estimate tokens
@@ -114,8 +117,8 @@ async def upload_dataset(
         # Clean up the file on extraction failure
         try:
             file_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Cleanup after extraction failure: %s", e)
         raise HTTPException(
             status_code=422,
             detail=f"Failed to process file '{safe_name}': {e}"
@@ -196,7 +199,8 @@ def preview_dataset(
     try:
         extracted = extract_text(file_path, dataset.file_type)
         text = extracted["text"]
-    except Exception:
+    except Exception as e:
+        logger.warning("Text extraction failed for dataset %d: %s", dataset_id, e)
         raise HTTPException(status_code=500, detail="Failed to extract text from file")
 
     # Create chunks
@@ -281,8 +285,8 @@ def preview_training(
                             )
                             preview["templated"] = templated[:500]
                             preview["templated_tokens"] = _count_tokens(templated)
-                    except Exception:
-                        pass  # Template preview is best-effort
+                    except Exception as e:
+                        logger.debug("Chat template preview failed: %s", e)
                 sample_previews.append(preview)
 
             all_examples.extend(examples)

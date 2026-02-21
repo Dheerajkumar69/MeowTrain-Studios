@@ -30,6 +30,19 @@ from transformers import (
 logger = logging.getLogger("meowllm.trainer")
 
 
+def get_best_device() -> str:
+    """
+    Return the best available training device: 'cuda', 'mps', or 'cpu'.
+    Works across all platforms: NVIDIA (CUDA), Apple Silicon (MPS),
+    AMD (ROCm via CUDA-compatible API), and CPU-only.
+    """
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 class TrainingMetrics:
     """
     Shared training state.
@@ -331,9 +344,26 @@ def create_model_and_trainer(
     metrics.total_steps = total_steps
     metrics.total_epochs = epochs
 
-    # Auto-detect mixed precision (bf16 preferred on Ampere+, fp16 otherwise)
-    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported() and training_method != "qlora"
-    use_fp16 = torch.cuda.is_available() and not use_bf16 and training_method != "qlora"
+    # ── Universal mixed-precision detection ─────────────────────────
+    device = get_best_device()
+    if device == "cuda":
+        use_bf16 = torch.cuda.is_bf16_supported() and training_method != "qlora"
+        use_fp16 = not use_bf16 and training_method != "qlora"
+    elif device == "mps":
+        # MPS handles precision internally — don't set fp16/bf16 flags
+        use_bf16 = False
+        use_fp16 = False
+    else:
+        # CPU — no mixed precision
+        use_bf16 = False
+        use_fp16 = False
+
+    # ── Optimizer selection ────────────────────────────────────────
+    # paged_adamw_8bit requires bitsandbytes (NVIDIA CUDA only)
+    if training_method == "qlora" and device == "cuda":
+        optim = "paged_adamw_8bit"
+    else:
+        optim = "adamw_torch"
 
     training_args = TrainingArguments(
         output_dir=output_dir,
@@ -354,16 +384,18 @@ def create_model_and_trainer(
         greater_is_better=False,
         fp16=use_fp16,
         bf16=use_bf16,
-        dataloader_pin_memory=torch.cuda.is_available(),
+        dataloader_pin_memory=(device == "cuda"),  # Only beneficial for CUDA
         remove_unused_columns=False,
         report_to="none",  # We handle our own reporting via callbacks
         lr_scheduler_type=lr_scheduler_type,
-        optim="adamw_torch" if training_method != "qlora" else "paged_adamw_8bit",
+        optim=optim,
         max_grad_norm=1.0,
         seed=42,
         dataloader_num_workers=0,  # Avoid multiprocessing issues in thread
         disable_tqdm=True,  # We have our own progress tracking
         gradient_checkpointing=use_gradient_checkpointing,
+        # Use CPU offload for MPS to avoid MPS-specific OOM
+        use_mps_device=(device == "mps"),
     )
 
     # ── DeepSpeed Multi-GPU ───────────────────────────────────────
@@ -430,9 +462,19 @@ def create_model_and_trainer(
     return trainer
 
 
+def _get_model_dtype(device: str) -> torch.dtype:
+    """Choose the best dtype for the given device."""
+    if device == "cuda":
+        return torch.float16
+    elif device == "mps":
+        return torch.float32  # MPS works best with float32 for stability
+    return torch.float32
+
+
 def _load_model(model_name: str, training_method: str):
-    """Load the base model with appropriate quantization."""
-    logger.info("Loading model: %s (method=%s)", model_name, training_method)
+    """Load the base model with appropriate quantization for any device."""
+    device = get_best_device()
+    logger.info("Loading model: %s (method=%s, device=%s)", model_name, training_method, device)
 
     from app.config import TRUST_REMOTE_CODE
     load_kwargs = {
@@ -442,35 +484,52 @@ def _load_model(model_name: str, training_method: str):
     }
 
     if training_method == "qlora":
-        # 4-bit quantization for QLoRA
-        try:
-            from transformers import BitsAndBytesConfig
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
+        # 4-bit quantization for QLoRA — requires bitsandbytes (CUDA only)
+        if device == "cuda":
+            try:
+                from transformers import BitsAndBytesConfig
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                )
+                load_kwargs["quantization_config"] = bnb_config
+                load_kwargs["device_map"] = "auto"
+                logger.info("QLoRA: Using 4-bit quantization (CUDA)")
+            except ImportError:
+                logger.warning("bitsandbytes not available, falling back to standard LoRA on CUDA")
+                load_kwargs["torch_dtype"] = torch.float16
+                load_kwargs["device_map"] = "auto"
+        else:
+            # MPS / CPU: bitsandbytes not supported, fall back to LoRA-compatible loading
+            logger.warning(
+                "QLoRA requires bitsandbytes (CUDA only). "
+                "Falling back to standard LoRA on %s.", device
             )
-            load_kwargs["quantization_config"] = bnb_config
-            load_kwargs["device_map"] = "auto"
-            logger.info("QLoRA: Using 4-bit quantization")
-        except ImportError:
-            logger.warning("bitsandbytes not available, falling back to standard LoRA")
-            load_kwargs["dtype"] = torch.float16 if torch.cuda.is_available() else torch.float32
+            load_kwargs["torch_dtype"] = _get_model_dtype(device)
+            if device == "mps":
+                load_kwargs["device_map"] = {"" : "mps"}
 
-    elif training_method == "lora":
-        load_kwargs["dtype"] = torch.float16 if torch.cuda.is_available() else torch.float32
-        if torch.cuda.is_available():
+    elif training_method in ("lora", "full"):
+        load_kwargs["torch_dtype"] = _get_model_dtype(device)
+        if device == "cuda":
             load_kwargs["device_map"] = "auto"
+        elif device == "mps":
+            load_kwargs["device_map"] = {"" : "mps"}
+        # CPU: no device_map needed, model stays on CPU
 
-    else:  # full fine-tune
-        load_kwargs["dtype"] = torch.float16 if torch.cuda.is_available() else torch.float32
-        if torch.cuda.is_available():
+    else:
+        # DPO / ORPO or unknown — same device-aware loading
+        load_kwargs["torch_dtype"] = _get_model_dtype(device)
+        if device == "cuda":
             load_kwargs["device_map"] = "auto"
+        elif device == "mps":
+            load_kwargs["device_map"] = {"" : "mps"}
 
     try:
         model = AutoModelForCausalLM.from_pretrained(**load_kwargs)
-        logger.info("Model loaded successfully: %s", model_name)
+        logger.info("Model loaded successfully on %s: %s", device, model_name)
         return model
     except torch.cuda.OutOfMemoryError:
         _cleanup_gpu()
@@ -478,6 +537,15 @@ def _load_model(model_name: str, training_method: str):
             f"GPU out of memory loading {model_name}. "
             "Try a smaller model, QLoRA method, or reduce batch size."
         )
+    except RuntimeError as e:
+        if "MPS" in str(e) or "mps" in str(e):
+            _cleanup_gpu()
+            raise RuntimeError(
+                f"MPS out of memory loading {model_name}. "
+                "Try a smaller model or reduce batch size. "
+                "Apple Silicon has shared memory — close other apps to free RAM."
+            )
+        raise RuntimeError(f"Failed to load model {model_name}: {e}")
     except Exception as e:
         raise RuntimeError(f"Failed to load model {model_name}: {e}")
 
@@ -553,8 +621,14 @@ def _find_target_modules(model) -> list[str]:
 
 
 def _cleanup_gpu():
-    """Force GPU memory cleanup."""
+    """Force GPU memory cleanup for any device (CUDA, MPS, or CPU)."""
+    gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        gc.collect()
-        logger.info("GPU memory cleaned up")
+        logger.info("CUDA GPU memory cleaned up")
+    elif hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+        try:
+            torch.mps.empty_cache()
+            logger.info("MPS memory cleaned up")
+        except Exception:
+            pass

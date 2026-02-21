@@ -82,28 +82,28 @@ class TestAuthExtended:
 
     def test_password_change_success(self, client, auth_headers):
         resp = client.post("/api/auth/password", json={
-            "current_password": "TestPass123",
-            "new_password": "NewSecure1",
+            "current_password": "TestPass123!",
+            "new_password": "NewSecure1!",
         }, headers=auth_headers)
         assert resp.status_code == 200
 
         # Login with new password
         login_resp = client.post("/api/auth/login", json={
             "email": "test@example.com",
-            "password": "NewSecure1",
+            "password": "NewSecure1!",
         })
         assert login_resp.status_code == 200
 
     def test_password_change_wrong_current(self, client, auth_headers):
         resp = client.post("/api/auth/password", json={
             "current_password": "WrongCurrent1",
-            "new_password": "NewSecure1",
+            "new_password": "NewSecure1!",
         }, headers=auth_headers)
         assert resp.status_code == 400
 
     def test_password_change_weak_new(self, client, auth_headers):
         resp = client.post("/api/auth/password", json={
-            "current_password": "TestPass123",
+            "current_password": "TestPass123!",
             "new_password": "short",
         }, headers=auth_headers)
         assert resp.status_code in (400, 422)  # Pydantic Field(min_length=8) catches first
@@ -113,7 +113,7 @@ class TestAuthExtended:
         guest_headers = {"Authorization": f"Bearer {guest_resp.json()['token']}"}
         resp = client.post("/api/auth/password", json={
             "current_password": "x",
-            "new_password": "NewSecure1",
+            "new_password": "NewSecure1!",
         }, headers=guest_headers)
         assert resp.status_code == 403
 

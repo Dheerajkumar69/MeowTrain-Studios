@@ -78,7 +78,7 @@ export default function TrainingPanel({ projectId, selectedModel, datasets, proj
                         // fp16/bf16 are internal — not exposed in config form
                     }));
                 }
-            } catch { /* device endpoint might not be available — use defaults */ }
+            } catch (err) { console.debug('Device info fetch failed (using defaults):', err.message || err); }
         };
         fetchDefaults();
         return () => { cancelled = true; };
@@ -96,7 +96,7 @@ export default function TrainingPanel({ projectId, selectedModel, datasets, proj
                     setStatus(res.data);
                     setTraining(true);
                 }
-            } catch { /* no active training — stay idle */ }
+            } catch (err) { console.debug('No active training:', err.message || err); }
         };
         checkActive();
         return () => { cancelled = true; };
@@ -108,7 +108,7 @@ export default function TrainingPanel({ projectId, selectedModel, datasets, proj
             try {
                 const res = await hardwareAPI.status();
                 setHardware(res.data);
-            } catch { /* silent */ }
+            } catch (err) { console.debug('HW poll:', err.message || err); }
         };
         poll();
         hwPollRef.current = setInterval(poll, 3000);
@@ -145,7 +145,7 @@ export default function TrainingPanel({ projectId, selectedModel, datasets, proj
                 try {
                     const res = await hardwareAPI.status();
                     setHardware(res.data);
-                } catch { /* silent */ }
+                } catch (err) { console.debug('HW poll (cleanup):', err.message || err); }
             };
             hwPollRef.current = setInterval(poll, 3000);
         };

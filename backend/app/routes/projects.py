@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import Optional
+import logging
 import shutil
 
 from app.database import get_db
@@ -16,6 +17,7 @@ from app.services.hardware_service import get_hardware_status
 from app.config import PROJECTS_DIR, GUEST_MAX_PROJECTS
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
+logger = logging.getLogger("meowllm.routes.projects")
 
 
 def _get_user(authorization: Optional[str], db: Session):
@@ -201,8 +203,8 @@ def delete_project(project_id: int, authorization: Optional[str] = Header(None),
         model_path = _get_model_path_for_project(project_id)
         if model_path:
             unload_model(model_path)
-    except Exception:
-        pass  # Best-effort — don't block deletion
+    except Exception as e:
+        logger.debug("Best-effort model unload failed for project %d: %s", project_id, e)
 
     # Stop any active training worker
     try:
@@ -211,8 +213,8 @@ def delete_project(project_id: int, authorization: Optional[str] = Header(None),
         if worker and worker.is_alive:
             worker.stop()
         unregister_worker(project_id)
-    except Exception:
-        pass  # Best-effort
+    except Exception as e:
+        logger.debug("Best-effort worker stop failed for project %d: %s", project_id, e)
 
     # Delete filesystem (verify path stays within PROJECTS_DIR to prevent traversal)
     project_dir = (PROJECTS_DIR / str(project_id)).resolve()

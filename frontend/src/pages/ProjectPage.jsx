@@ -43,7 +43,9 @@ export default function ProjectPage() {
             try {
                 const dsRes = await datasetsAPI.list(id);
                 setDatasets(dsRes.data?.items ?? dsRes.data ?? []);
-            } catch { /* dataset list failure is non-fatal */ }
+            } catch (dsErr) {
+                console.warn('Dataset list failed (non-fatal):', dsErr.message || dsErr);
+            }
         } catch (err) {
             if (err.response?.status === 404) {
                 navigate('/');

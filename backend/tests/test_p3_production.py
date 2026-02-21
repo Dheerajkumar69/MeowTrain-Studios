@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 
 # ── Helpers ──
 
-def _register(client, email="p3test@example.com", password="TestPass123"):
+def _register(client, email="p3test@example.com", password="TestPass123!"):
     resp = client.post("/api/auth/register", json={
         "email": email,
         "password": password,
@@ -31,7 +31,7 @@ def _register(client, email="p3test@example.com", password="TestPass123"):
     return resp.json()
 
 
-def _login(client, email="p3test@example.com", password="TestPass123"):
+def _login(client, email="p3test@example.com", password="TestPass123!"):
     resp = client.post("/api/auth/login", json={
         "email": email, "password": password,
     })

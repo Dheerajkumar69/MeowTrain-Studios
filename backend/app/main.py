@@ -24,11 +24,46 @@ logger = logging.getLogger("meowllm")
 limiter = Limiter(key_func=get_remote_address)
 
 
-# ── Lifespan (replaces deprecated on_event) ──
+def _migrate_database():
+    """Run Alembic migrations if available, otherwise fall back to create_all().
+
+    In production, Alembic is the source of truth for schema changes,
+    preventing the conflict where create_all() creates tables that skip
+    migration version tracking.
+
+    For fresh installs or dev setups without Alembic configured,
+    falls back gracefully to create_all().
+    """
+    try:
+        from alembic.config import Config as AlembicConfig
+        from alembic import command as alembic_command
+        import os
+
+        alembic_ini = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "alembic.ini"
+        )
+        if os.path.exists(alembic_ini):
+            alembic_cfg = AlembicConfig(alembic_ini)
+            # Suppress alembic's own logging to avoid noise
+            alembic_cfg.set_main_option("script_location",
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "alembic"))
+            alembic_command.upgrade(alembic_cfg, "head")
+            logger.info("Database migrations applied successfully (Alembic)")
+            return
+        else:
+            logger.info("No alembic.ini found — falling back to create_all()")
+    except ImportError:
+        logger.info("Alembic not installed — falling back to create_all()")
+    except Exception as e:
+        logger.warning("Alembic migration failed (%s) — falling back to create_all()", e)
+
+    # Fallback: create_all() for fresh installs / dev without Alembic
+    create_tables()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    create_tables()
+    # Startup — run Alembic migrations (falls back to create_all for fresh installs)
+    _migrate_database()
     _reconcile_interrupted_tasks()
     _cleanup_stale_guests()
 
@@ -47,7 +82,13 @@ async def lifespan(app: FastAPI):
 
 
 def _reconcile_interrupted_tasks():
-    """Mark any background tasks / training runs stuck in 'running' as interrupted."""
+    """Mark any background tasks / training runs stuck in 'running' as interrupted.
+    
+    Also kills orphaned training processes via their stored worker_pid.
+    """
+    import os
+    import signal
+
     from app.database import SessionLocal
     from app.models.training_run import TrainingRun
     from app.models.background_task import BackgroundTask  # noqa: ensure table created
@@ -61,7 +102,7 @@ def _reconcile_interrupted_tasks():
             "but MUST be changed before exposing to the network."
         )
     logger.info(
-        "🔒 PRODUCTION REMINDER: MeowTrain serves plain HTTP with no CSRF protection. "
+        "🔒 PRODUCTION REMINDER: MeowTrain serves plain HTTP. "
         "For production deployments, place behind a TLS-terminating reverse proxy "
         "(Caddy, nginx, Traefik) and restrict CORS origins."
     )
@@ -73,7 +114,24 @@ def _reconcile_interrupted_tasks():
             TrainingRun.status.in_(("running", "paused", "initializing"))
         ).all()
         for run in stuck_runs:
+            # Try to kill the orphaned training process if PID is stored
+            if run.worker_pid:
+                try:
+                    os.kill(run.worker_pid, signal.SIGTERM)
+                    logger.warning(
+                        "Sent SIGTERM to orphaned training process PID %d (run %d)",
+                        run.worker_pid, run.id,
+                    )
+                except ProcessLookupError:
+                    logger.info("Orphan PID %d already dead (run %d)", run.worker_pid, run.id)
+                except PermissionError:
+                    logger.warning(
+                        "Cannot kill PID %d — permission denied (run %d)",
+                        run.worker_pid, run.id,
+                    )
+
             run.status = "error"
+            run.worker_pid = None  # Clear stale PID
             run.error_message = (
                 "Server restarted while this training run was in progress. "
                 "Please start a new run."
@@ -224,6 +282,47 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# ── CSRF protection middleware ──
+class CSRFProtectionMiddleware(BaseHTTPMiddleware):
+    """Validate Origin/Referer on state-changing requests to prevent CSRF.
+
+    Since MeowTrain uses Bearer token auth (not cookies), CSRF risk is
+    low — but this adds defense-in-depth for any future cookie-based flows
+    (e.g. OAuth redirect cookies).
+    """
+    _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method in self._SAFE_METHODS:
+            return await call_next(request)
+
+        # Skip CSRF check for non-browser clients (no Origin header)
+        origin = request.headers.get("origin")
+        referer = request.headers.get("referer")
+        if not origin and not referer:
+            # No browser indicators — likely API client, allow through
+            return await call_next(request)
+
+        # Validate origin matches allowed CORS origins
+        allowed = set(CORS_ORIGINS) if CORS_ORIGINS != ["*"] else None
+        if allowed:
+            check_origin = origin or (referer.split("/", 3)[:3] if referer else [""])
+            if isinstance(check_origin, list):
+                check_origin = "/".join(check_origin)
+            if check_origin not in allowed:
+                logger.warning(
+                    "CSRF: rejected %s %s from origin %s (allowed: %s)",
+                    request.method, request.url.path, check_origin, allowed,
+                )
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Cross-origin request blocked (CSRF protection)"},
+                )
+
+        return await call_next(request)
+
+
+app.add_middleware(CSRFProtectionMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestBodyLimitMiddleware)
 

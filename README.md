@@ -73,8 +73,8 @@ npm run dev              # http://localhost:5173
 # GPU mode (auto-detects at container startup)
 docker compose up --build
 
-# CPU-only mode (no GPU)
-docker compose -f docker-compose.yml -f docker-compose.cpu.yml up --build
+# CPU-only mode (no GPU) — standalone compose file
+docker compose -f docker-compose.cpu.yml up --build
 ```
 
 ## 🛠️ Environment Variables
@@ -131,6 +131,96 @@ Meow-Train/
 ├── docker-compose.yml
 └── README.md
 ```
+
+## 🚀 Production Deployment Guide
+
+### Docker (Recommended)
+
+```bash
+# 1. Clone and configure
+git clone https://github.com/your-org/MeowTrain-Studios.git
+cd MeowTrain-Studios
+
+# 2. Set up environment variables
+cp backend/.env.example backend/.env
+# Edit backend/.env with your production values (see below)
+
+# 3. Build and run
+docker-compose up -d --build
+
+# 4. Verify
+curl http://localhost:8000/api/health
+```
+
+### Critical Production Settings
+
+Edit `backend/.env` with these values **before deploying**:
+
+```bash
+# REQUIRED — generate a unique secret:
+#   python -c "import secrets; print(secrets.token_urlsafe(32))"
+MEOWLLM_JWT_SECRET=your-unique-secret-here
+
+# Lock CORS to your domain only
+MEOWLLM_CORS_ORIGINS=https://your-domain.com
+
+# Enable HTTPS security headers
+MEOWLLM_ENFORCE_HTTPS=true
+
+# Use PostgreSQL in production (not SQLite)
+MEOWLLM_DATABASE_URL=postgresql://user:pass@db:5432/meowtrain
+
+# Optional: Email for password reset & verification
+MEOWLLM_SMTP_HOST=smtp.gmail.com
+MEOWLLM_SMTP_PORT=587
+MEOWLLM_SMTP_USER=your-email@gmail.com
+MEOWLLM_SMTP_PASSWORD=your-app-password
+MEOWLLM_SMTP_FROM=noreply@your-domain.com
+```
+
+### HTTPS with Reverse Proxy
+
+MeowTrain does NOT handle TLS directly. Place it behind a reverse proxy:
+
+**Caddy (simplest):**
+```
+your-domain.com {
+    reverse_proxy localhost:5173
+    handle_path /api/* {
+        reverse_proxy localhost:8000
+    }
+}
+```
+
+**Nginx:**
+```nginx
+server {
+    listen 443 ssl;
+    server_name your-domain.com;
+    ssl_certificate /etc/ssl/cert.pem;
+    ssl_certificate_key /etc/ssl/key.pem;
+
+    location / { proxy_pass http://localhost:5173; }
+    location /api/ { proxy_pass http://localhost:8000; }
+    location /ws/ {
+        proxy_pass http://localhost:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+### Security Checklist
+
+- [ ] Change `MEOWLLM_JWT_SECRET` from default
+- [ ] Set `MEOWLLM_ENFORCE_HTTPS=true`
+- [ ] Lock `MEOWLLM_CORS_ORIGINS` to your domain
+- [ ] Use PostgreSQL (not SQLite) for multi-user
+- [ ] Set `MEOWLLM_TRUST_REMOTE_CODE=false` (default)
+- [ ] Place behind TLS reverse proxy
+- [ ] Set up log monitoring (`meowllm.security` logger)
+- [ ] Configure rate limits for your expected traffic
 
 ## 📄 License
 

@@ -27,14 +27,52 @@ from app.config import MODEL_CATALOG, MODEL_CACHE_DIR, PROJECTS_DIR
 from app.services.hardware_service import get_hardware_status
 from app.services.auth_service import get_user_from_header
 
+# Import shared helpers (extracted to reduce file size)
+from app.routes.models_helpers import (
+    sanitize_filename,
+    check_hf_rate_limit,
+    get_or_create_task,
+    update_task,
+    finish_task,
+    get_task_status,
+    cleanup_stale_tasks,
+    check_compatibility,
+    is_model_cached,
+    validate_snapshot_dir,
+    get_disk_free_gb,
+    check_hf_reachable,
+    hf_api_call_with_retry,
+    _MODEL_ID_RE,
+    _HF_API_TIMEOUT,
+    _HF_MAX_RETRIES,
+    _DISK_HEADROOM_GB,
+    _DOWNLOAD_STALE_HOURS,
+    _DOWNLOAD_TTL,
+    _REQUIRED_SNAPSHOT_FILES,
+)
+
 logger = logging.getLogger("meowllm.models")
 
 router = APIRouter(prefix="/models", tags=["Models"])
 
-# ── In-memory locks (for thread safety of DB writes only) ────────────
-_download_lock = threading.Lock()
-_gguf_lock = threading.Lock()
-_DOWNLOAD_TTL = 3600  # 1 hour — auto-cleanup completed/errored downloads
+# Backward-compatible aliases for internal usage throughout this file
+_sanitize_filename = sanitize_filename
+_check_hf_rate_limit = check_hf_rate_limit
+_get_or_create_task = get_or_create_task
+_update_task = update_task
+_finish_task = finish_task
+_get_task_status = get_task_status
+_cleanup_stale_tasks = cleanup_stale_tasks
+_check_compatibility = check_compatibility
+_is_model_cached = is_model_cached
+_validate_snapshot_dir = validate_snapshot_dir
+_get_disk_free_gb = get_disk_free_gb
+_check_hf_reachable = check_hf_reachable
+_hf_api_call_with_retry = hf_api_call_with_retry
+
+# Note: In-memory locks removed — DB-backed BackgroundTask model provides
+# cross-process safe task management (works with gunicorn -w N).
+_DOWNLOAD_TTL_LOCAL = _DOWNLOAD_TTL  # Alias for local reference
 
 # ── Constants ───────────────────────────────────────────────────────
 _HF_API_TIMEOUT = 15      # seconds for HuggingFace API calls
@@ -48,12 +86,26 @@ _hf_lookup_times: dict[str, list[float]] = {}  # ip → [timestamps]
 _HF_LOOKUP_RATE_LIMIT = 10     # lookups per window
 _HF_LOOKUP_WINDOW = 60         # seconds
 _hf_rate_lock = threading.Lock()
+_hf_purge_counter = 0          # purge stale IPs every N calls
+_HF_PURGE_INTERVAL = 100       # purge after this many rate checks
 
 
 def _check_hf_rate_limit(client_id: str) -> bool:
     """Return True if the client is within rate limits, False if throttled."""
+    global _hf_purge_counter
     now = time.time()
     with _hf_rate_lock:
+        # Periodic purge of stale IPs to prevent memory leak
+        _hf_purge_counter += 1
+        if _hf_purge_counter >= _HF_PURGE_INTERVAL:
+            _hf_purge_counter = 0
+            stale_ips = [
+                ip for ip, times in _hf_lookup_times.items()
+                if not times or (now - max(times)) > _HF_LOOKUP_WINDOW * 2
+            ]
+            for ip in stale_ips:
+                del _hf_lookup_times[ip]
+
         times = _hf_lookup_times.get(client_id, [])
         # Prune old entries
         times = [t for t in times if now - t < _HF_LOOKUP_WINDOW]

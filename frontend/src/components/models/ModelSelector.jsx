@@ -83,7 +83,7 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
     useEffect(() => {
         modelsAPI.preflight()
             .then(res => setPreflight(res.data))
-            .catch(() => {}); // Silent — not critical
+            .catch(() => { }); // Silent — not critical
     }, []);
 
     // Cleanup polling on unmount
@@ -100,7 +100,8 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
             const res = await modelsAPI.preflight(modelId);
             setPreflight(res.data);
             return res.data;
-        } catch {
+        } catch (err) {
+            console.debug('Preflight check failed:', err.message || err);
             return null;
         } finally {
             setPreflightLoading(false);
@@ -196,7 +197,8 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                     clearInterval(pollRefs.current[modelId]);
                     delete pollRefs.current[modelId];
                 }
-            } catch {
+            } catch (pollErr) {
+                console.debug('Download poll error:', pollErr.message || pollErr);
                 consecutiveErrors++;
                 if (consecutiveErrors >= MAX_POLL_ERRORS) {
                     clearInterval(pollRefs.current[modelId]);
@@ -407,7 +409,7 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                         </div>
                     )}
                     <button
-                        onClick={() => modelsAPI.preflight().then(r => setPreflight(r.data)).catch(() => {})}
+                        onClick={() => modelsAPI.preflight().then(r => setPreflight(r.data)).catch(() => { })}
                         className="text-xs text-amber-700 hover:text-amber-900 font-medium flex items-center gap-1"
                     >
                         <RefreshCw className="w-3 h-3" /> Recheck
@@ -476,7 +478,7 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                                                     <span className="text-xs text-surface-500">{r.parameters || '?'} params</span>
                                                     {r.size_gb > 0 && <span className="text-xs text-surface-400">• {r.size_gb} GB</span>}
                                                     {r.downloads > 0 && (
-                                                        <span className="text-xs text-surface-400">• {r.downloads >= 1e6 ? `${(r.downloads/1e6).toFixed(1)}M` : r.downloads >= 1000 ? `${(r.downloads/1000).toFixed(0)}K` : r.downloads} downloads</span>
+                                                        <span className="text-xs text-surface-400">• {r.downloads >= 1e6 ? `${(r.downloads / 1e6).toFixed(1)}M` : r.downloads >= 1000 ? `${(r.downloads / 1000).toFixed(0)}K` : r.downloads} downloads</span>
                                                     )}
                                                 </div>
                                             </div>

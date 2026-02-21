@@ -24,6 +24,22 @@ export default function RegisterPage() {
             setError('Password must be 128 characters or less');
             return;
         }
+        if (!/[A-Z]/.test(password)) {
+            setError('Password must contain at least one uppercase letter');
+            return;
+        }
+        if (!/[a-z]/.test(password)) {
+            setError('Password must contain at least one lowercase letter');
+            return;
+        }
+        if (!/\d/.test(password)) {
+            setError('Password must contain at least one digit');
+            return;
+        }
+        if (!/[!@#$%^&*()_+\-=\[\]{}|;':",./<>?`~]/.test(password)) {
+            setError('Password must contain at least one special character (!@#$%...)');
+            return;
+        }
         setLoading(true);
         try {
             await register(email, password, name);

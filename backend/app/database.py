@@ -10,10 +10,11 @@ logger = logging.getLogger("meowllm.database")
 _engine_kwargs = {"echo": False}
 
 if DATABASE_URL.startswith("sqlite"):
-    # SQLite-specific: allow multi-threaded access
+    # SQLite-specific: allow multi-threaded access via WAL mode
     _engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
-    # Use WAL mode for better concurrency + enable foreign keys
-    _engine_kwargs["pool_size"] = 1  # SQLite handles its own locking
+    # Use QueuePool with size > 1 — WAL mode supports concurrent readers
+    _engine_kwargs["pool_size"] = 5
+    _engine_kwargs["max_overflow"] = 10
     _engine_kwargs["pool_pre_ping"] = True
 else:
     # PostgreSQL/MySQL: use connection pooling
