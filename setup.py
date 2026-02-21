@@ -67,6 +67,8 @@ TORCH_INDEX_URLS = {
     "cu124": "https://download.pytorch.org/whl/cu124",
     "cu121": "https://download.pytorch.org/whl/cu121",
     "cu118": "https://download.pytorch.org/whl/cu118",
+    "rocm6.2": "https://download.pytorch.org/whl/rocm6.2",
+    "rocm6.1": "https://download.pytorch.org/whl/rocm6.1",
     "cpu":   "https://download.pytorch.org/whl/cpu",
 }
 
@@ -750,7 +752,7 @@ def _main_inner(args: argparse.Namespace) -> int:
         reason = "Apple Silicon detected"
     elif amd_info:
         mode = "rocm"
-        reason = "AMD ROCm detected (experimental — installing CPU PyTorch)"
+        reason = "AMD ROCm detected — installing ROCm-compatible PyTorch"
     else:
         mode = "cpu"
         reason = "no GPU detected"
@@ -761,6 +763,11 @@ def _main_inner(args: argparse.Namespace) -> int:
     if mode == "mps":
         torch_tag = "mps"
         index_url = ""  # Use default PyPI, PyTorch ships with MPS on macOS arm64
+
+    # Special case for AMD ROCm — use ROCm-compatible PyTorch
+    if mode == "rocm":
+        torch_tag = "rocm6.2"
+        index_url = TORCH_INDEX_URLS["rocm6.2"]
 
     print(f"{C.BOLD}⚙️  Install Mode: {C.GREEN}{mode.upper()}{C.RESET}")
     print(f"   Reason: {reason}")
@@ -809,6 +816,12 @@ def _main_inner(args: argparse.Namespace) -> int:
         if not ok:
             print(f"  {C.YELLOW}⚠ Some GPU packages failed (bitsandbytes/deepspeed are optional){C.RESET}")
             errors.append("Some GPU packages failed (non-critical)")
+    elif mode == "rocm":
+        # ROCm gets CPU requirements (no bitsandbytes/deepspeed for AMD yet)
+        ok = install_requirements("requirements-cpu.txt", dry_run=args.dry_run)
+        if not ok:
+            print(f"  {C.YELLOW}⚠ Some AMD/ROCm packages failed{C.RESET}")
+            errors.append("Some ROCm packages failed")
     else:
         ok = install_requirements("requirements-cpu.txt", dry_run=args.dry_run)
         if not ok:
@@ -824,10 +837,34 @@ def _main_inner(args: argparse.Namespace) -> int:
     validation: dict = {}
     if not args.skip_validation and not args.dry_run:
         expected_device = mode if mode in ("cuda", "mps") else "cpu"
+        # ROCm reports as CUDA via HIP, so expect "cuda" for ROCm too
+        if mode == "rocm":
+            expected_device = "cuda"
         validation = validate_installation(expected_device)
 
-        if mode == "cuda" and validation.get("device") == "cpu":
-            print(f"\n  {C.YELLOW}⚠ GPU mode was selected but CUDA is not available to PyTorch.{C.RESET}")
+        # Additional ROCm-specific validation
+        if mode == "rocm" and validation.get("device") == "cuda":
+            try:
+                import torch
+                if hasattr(torch.version, "hip") and torch.version.hip:
+                    validation["rocm_version"] = torch.version.hip
+                    validation["is_rocm"] = True
+                    print(f"  {C.GREEN}✓ ROCm/HIP detected: {torch.version.hip}{C.RESET}")
+                    # Quick tensor test on AMD GPU
+                    t = torch.tensor([1.0, 2.0, 3.0], device="cuda")
+                    result = (t * 2).sum().item()
+                    if result == 12.0:
+                        print(f"  {C.GREEN}✓ AMD GPU tensor operations verified{C.RESET}")
+                    else:
+                        print(f"  {C.YELLOW}⚠ AMD GPU tensor test returned unexpected result{C.RESET}")
+                else:
+                    print(f"  {C.YELLOW}⚠ ROCm mode but HIP not detected in PyTorch{C.RESET}")
+            except Exception as e:
+                print(f"  {C.YELLOW}⚠ ROCm validation failed: {e}{C.RESET}")
+                validation["rocm_validation_error"] = str(e)
+
+        if mode in ("cuda", "rocm") and validation.get("device") == "cpu":
+            print(f"\n  {C.YELLOW}⚠ GPU mode was selected but GPU is not available to PyTorch.{C.RESET}")
             print(f"    Training will fall back to CPU.")
             mode = "cpu"
 
@@ -870,6 +907,11 @@ def _main_inner(args: argparse.Namespace) -> int:
         print(f"  {C.GREEN}🚀 GPU training enabled!{C.RESET}")
         print(f"     Your {gpu_info['primary_gpu']} with {gpu_info['primary_vram_gb']} GB VRAM is ready.")
         print(f"     LoRA, QLoRA, and full fine-tuning are all available.")
+    elif mode == "rocm" and amd_info:
+        print(f"  {C.GREEN}🔴 AMD ROCm GPU training enabled!{C.RESET}")
+        print(f"     Your AMD GPU is ready for training via ROCm.")
+        print(f"     LoRA and full fine-tuning are available.")
+        print(f"     Note: QLoRA (bitsandbytes) is not yet supported on AMD GPUs.")
     elif mode == "mps":
         print(f"  {C.GREEN}🍎 Apple Silicon training enabled!{C.RESET}")
         print(f"     MPS acceleration will be used for training.")

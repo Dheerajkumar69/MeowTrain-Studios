@@ -49,7 +49,7 @@ def main():
     print("📂 Step 1: Loading training dataset...")
     dataset_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        "..", "training dataset.txt"
+        "..", "training_dataset.txt"
     )
     dataset_path = os.path.normpath(dataset_path)
 

@@ -103,6 +103,11 @@ class TrainingWorker:
     def is_alive(self) -> bool:
         return self._process is not None and self._process.is_alive()
 
+    @property
+    def pid(self) -> int | None:
+        """OS process ID of the training child process (None if not started)."""
+        return self._process.pid if self._process else None
+
     def start(self):
         """Launch training in a child process."""
         if self.is_alive:
@@ -594,10 +599,13 @@ def _finalize_db(db, run_id: int, project_id: int, metrics, elapsed: float, erro
 
 
 def _cleanup_gpu():
-    """Force GPU memory cleanup."""
+    """Force GPU/device memory cleanup (CUDA, MPS, or CPU)."""
     try:
         gc.collect()
-        if torch is not None and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if torch is not None:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            elif hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
     except Exception:
         pass

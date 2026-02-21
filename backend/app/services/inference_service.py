@@ -323,7 +323,9 @@ def get_model_info(project_id: int) -> Optional[dict]:
 
 
 def _cleanup_gpu():
-    """Force GPU memory cleanup."""
+    """Force GPU/device memory cleanup (CUDA, MPS, or CPU)."""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    elif hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+        torch.mps.empty_cache()

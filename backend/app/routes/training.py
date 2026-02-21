@@ -101,7 +101,7 @@ def start_training(
     # Clean up any dead workers first
     cleanup_dead_workers()
 
-    # Check if training is already running for this project
+    # Check if training is already running for this project (fast in-memory check)
     existing_worker = get_worker(project.id)
     if existing_worker and existing_worker.is_alive:
         raise HTTPException(status_code=409, detail="Training already in progress.")
@@ -116,18 +116,51 @@ def start_training(
     if not run:
         raise HTTPException(status_code=400, detail="No training configured. Configure training first.")
 
-    # Validate state machine: only configured/error/stopped/completed runs can be (re)started
-    _STARTABLE_STATUSES = {"configured", "error", "stopped", "completed"}
     if run.status == "running":
         raise HTTPException(status_code=409, detail="Training already in progress.")
     if run.status == "paused":
         raise HTTPException(status_code=409, detail="Training is paused. Resume it instead of starting a new one.")
+
+    # ── ATOMIC STATUS TRANSITION ──
+    # Use update().where() to atomically claim this run.
+    # If two requests race, only one will match the WHERE clause and
+    # update 1 row; the other will update 0 rows and get a 409.
+    _STARTABLE_STATUSES = {"configured", "error", "stopped", "completed"}
     if run.status not in _STARTABLE_STATUSES:
         raise HTTPException(status_code=400, detail=f"Cannot start training from status '{run.status}'.")
+
+    rows_updated = (
+        db.query(TrainingRun)
+        .filter(
+            TrainingRun.id == run.id,
+            TrainingRun.status.in_(_STARTABLE_STATUSES),
+        )
+        .update(
+            {
+                TrainingRun.status: "running",
+                TrainingRun.started_at: datetime.now(timezone.utc),
+                TrainingRun.completed_at: None,
+                TrainingRun.error_message: None,
+            },
+            synchronize_session="fetch",
+        )
+    )
+    if rows_updated == 0:
+        # Another request already claimed this run
+        raise HTTPException(status_code=409, detail="Training already in progress (concurrent request).")
+
+    project.status = "training"
+    db.commit()
+    db.refresh(run)
 
     # Get the model config for hyperparameters
     config = db.query(ModelConfig).filter(ModelConfig.id == run.model_config_id).first()
     if not config:
+        # Roll back the status change
+        run.status = "error"
+        run.error_message = "Training configuration not found."
+        project.status = "created"
+        db.commit()
         raise HTTPException(status_code=400, detail="Training configuration not found.")
 
     # Verify datasets still exist
@@ -136,15 +169,11 @@ def start_training(
         Dataset.status == "ready",
     ).count()
     if dataset_count == 0:
+        run.status = "error"
+        run.error_message = "No ready datasets found."
+        project.status = "created"
+        db.commit()
         raise HTTPException(status_code=400, detail="No ready datasets found. Upload data before training.")
-
-    # Update DB status
-    run.status = "running"
-    run.started_at = datetime.now(timezone.utc)
-    run.completed_at = None  # Reset completion time for re-runs
-    run.error_message = None  # Clear any previous error
-    project.status = "training"
-    db.commit()
 
     # Create and launch the real TrainingWorker
     hyperparams = config.hyperparameters or {}
@@ -159,6 +188,10 @@ def start_training(
     )
     register_worker(project.id, worker)
     worker.start()
+
+    # Persist the worker PID for orphan recovery after server restart
+    run.worker_pid = worker.pid
+    db.commit()
 
     return {"detail": "Training started", "run_id": run.id}
 
@@ -467,8 +500,19 @@ def compare_runs(
     }
 
 
+# ── WebSocket connection limits ──
+_ws_connections: dict[int, int] = {}  # user_id → active connection count
+_ws_total = 0
+_WS_MAX_PER_USER = 5
+_WS_MAX_TOTAL = 50
+_ws_lock = __import__("threading").Lock()
+
+
 @router.websocket("/ws")
 async def training_ws(websocket: WebSocket, project_id: int):
+    global _ws_total
+    user_id: int | None = None
+
     # Accept connection first — auth comes via first message (not query param)
     await websocket.accept()
 
@@ -498,10 +542,25 @@ async def training_ws(websocket: WebSocket, project_id: int):
             await websocket.send_json({"type": "auth_error", "reason": "Project not found"})
             await websocket.close(code=4003, reason="Project not found")
             return
-    except Exception:
+    except Exception as e:
+        logger.warning("WS auth failed for project %d: %s", project_id, e)
         await websocket.send_json({"type": "auth_error", "reason": "Invalid token"})
         await websocket.close(code=4001, reason="Invalid token")
         return
+    # ── WebSocket rate limiting: check connection counts ──
+    user_id = user.id
+    with _ws_lock:
+        user_count = _ws_connections.get(user_id, 0)
+        if _ws_total >= _WS_MAX_TOTAL:
+            await websocket.send_json({"type": "rate_limit", "reason": "Too many active WebSocket connections"})
+            await websocket.close(code=4029, reason="Server connection limit")
+            return
+        if user_count >= _WS_MAX_PER_USER:
+            await websocket.send_json({"type": "rate_limit", "reason": f"Max {_WS_MAX_PER_USER} connections per user"})
+            await websocket.close(code=4029, reason="Per-user connection limit")
+            return
+        _ws_connections[user_id] = user_count + 1
+        _ws_total += 1
 
     # Use a single DB session for the entire WS lifetime to avoid leaks
     ws_db = SessionLocal()
@@ -549,7 +608,8 @@ async def training_ws(websocket: WebSocket, project_id: int):
                             remaining_steps = payload["total_steps"] - payload["current_step"]
                             payload["eta_seconds"] = round(secs_per_step * remaining_steps)
                             payload["elapsed_seconds"] = round(elapsed_seconds)
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("ETA calc failed for project %d: %s", project_id, e)
                         ws_db.rollback()  # Reset session on error
             else:
                 # No active worker — check if there's a recent completed/error run
@@ -573,14 +633,16 @@ async def training_ws(websocket: WebSocket, project_id: int):
                             "tokens_per_sec": run.tokens_per_sec,
                             "error_message": run.error_message,
                         }
-                except Exception:
+                except Exception as e:
+                    logger.debug("DB query failed in WS for project %d: %s", project_id, e)
                     ws_db.rollback()  # Reset session on error
 
             # Always include live hardware stats
             try:
                 from app.services.hardware_service import get_hardware_status
                 payload["hardware"] = get_hardware_status()
-            except Exception:
+            except Exception as e:
+                logger.debug("Hardware status fetch failed: %s", e)
                 payload["hardware"] = None
 
             # ── Backpressure: try to send, back off if client is slow ──
@@ -611,11 +673,21 @@ async def training_ws(websocket: WebSocket, project_id: int):
             await asyncio.sleep(_current_interval)
     except WebSocketDisconnect:
         pass
-    except Exception:
+    except Exception as e:
         # Graceful close on any unexpected error
+        logger.warning("WS error for project %d: %s", project_id, e)
         try:
             await websocket.close()
         except Exception:
-            pass
+            pass  # Already closing, nothing to log
     finally:
         ws_db.close()
+        # Decrement connection counters
+        if user_id is not None:
+            with _ws_lock:
+                count = _ws_connections.get(user_id, 1)
+                if count <= 1:
+                    _ws_connections.pop(user_id, None)
+                else:
+                    _ws_connections[user_id] = count - 1
+                _ws_total = max(0, _ws_total - 1)

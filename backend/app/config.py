@@ -1,10 +1,19 @@
 import os
+import shutil
 import warnings
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env file if it exists
+# Auto-create .env from .env.example if it doesn't exist
 _env_path = Path(__file__).resolve().parent.parent / ".env"
+_env_example_path = Path(__file__).resolve().parent.parent / ".env.example"
+if not _env_path.exists() and _env_example_path.exists():
+    shutil.copy2(_env_example_path, _env_path)
+    warnings.warn(
+        "\n⚠️  No .env file found — created one from .env.example.\n"
+        "   Review and update backend/.env with your settings before deploying.\n",
+        stacklevel=2,
+    )
 load_dotenv(_env_path)
 
 # ===== Database =====
@@ -154,6 +163,30 @@ MODEL_CATALOG = [
         "icon": "🦙",
     },
     {
+        "model_id": "openai-community/gpt2",
+        "name": "GPT-2 (124M)",
+        "description": "Classic language model. Tiny and fast — perfect for testing pipelines and quick experiments.",
+        "parameters": "124M",
+        "size_gb": 0.5,
+        "ram_required_gb": 4,
+        "vram_required_gb": 2,
+        "recommended_hardware": "Any GPU or CPU",
+        "estimated_train_minutes": 5,
+        "icon": "🤖",
+    },
+    {
+        "model_id": "microsoft/phi-3-mini-4k-instruct",
+        "name": "Microsoft Phi-3 Mini",
+        "description": "State-of-the-art small model. Excellent reasoning and instruction following for its size.",
+        "parameters": "3.8B",
+        "size_gb": 7.6,
+        "ram_required_gb": 14,
+        "vram_required_gb": 6,
+        "recommended_hardware": "6GB+ VRAM or 14GB+ RAM",
+        "estimated_train_minutes": 35,
+        "icon": "🔬",
+    },
+    {
         "model_id": "microsoft/phi-2",
         "name": "Microsoft Phi-2",
         "description": "Small but mighty reasoning model. Excellent for code and logical tasks.",
@@ -164,6 +197,18 @@ MODEL_CATALOG = [
         "recommended_hardware": "6GB+ VRAM or 12GB+ RAM",
         "estimated_train_minutes": 30,
         "icon": "🔬",
+    },
+    {
+        "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+        "name": "Qwen 2.5 1.5B Instruct",
+        "description": "Alibaba's latest small model. Strong multilingual and code capabilities.",
+        "parameters": "1.5B",
+        "size_gb": 3.1,
+        "ram_required_gb": 8,
+        "vram_required_gb": 4,
+        "recommended_hardware": "4GB+ VRAM or 8GB+ RAM",
+        "estimated_train_minutes": 20,
+        "icon": "🌐",
     },
     {
         "model_id": "mistralai/Mistral-7B-Instruct-v0.2",

@@ -55,9 +55,12 @@ def _detect_live() -> dict:
         config["torch_version"] = torch.__version__
 
         if torch.cuda.is_available():
-            config["mode"] = "cuda"
-            config["training_device"] = "cuda"
+            # Check if this is actually AMD ROCm (presents as CUDA via HIP)
+            is_rocm = hasattr(torch.version, "hip") and torch.version.hip is not None
+            config["mode"] = "rocm" if is_rocm else "cuda"
+            config["training_device"] = "cuda"  # ROCm uses CUDA API
             config["cuda_available"] = True
+            config["is_rocm"] = is_rocm
             try:
                 config["gpu_name"] = torch.cuda.get_device_name(0)
                 props = torch.cuda.get_device_properties(0)
@@ -65,6 +68,8 @@ def _detect_live() -> dict:
             except Exception as e:
                 logger.warning("Could not query GPU properties: %s", e)
             config["cuda_version"] = torch.version.cuda
+            if is_rocm:
+                config["hip_version"] = torch.version.hip
             config["gpu_count"] = torch.cuda.device_count()
 
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -204,17 +209,21 @@ def get_optimal_training_defaults(device: str | None = None) -> dict:
     }
 
     if device == "cuda" and vram_gb:
+        is_rocm = config.get("is_rocm", False) or config.get("mode") == "rocm"
         if vram_gb >= 24:
-            # High-end GPU (3090, 4090, A100, etc.)
+            # High-end GPU (3090, 4090, A100, RX 7900 XTX, etc.)
             defaults.update({
                 "batch_size": 8,
                 "fp16": False,
-                "bf16": True,
+                "bf16": not is_rocm,  # bf16 can be unstable on some AMD GPUs
                 "max_tokens": 1024,
                 "gradient_accumulation_steps": 2,
             })
+            if is_rocm:
+                defaults["fp16"] = True
+                defaults["bf16"] = False
         elif vram_gb >= 12:
-            # Mid-range GPU (3060 12GB, 4070, etc.)
+            # Mid-range GPU (3060 12GB, 4070, RX 7800 XT, etc.)
             defaults.update({
                 "batch_size": 4,
                 "fp16": True,
@@ -223,7 +232,7 @@ def get_optimal_training_defaults(device: str | None = None) -> dict:
                 "gradient_accumulation_steps": 4,
             })
         elif vram_gb >= 6:
-            # Low-end GPU (3060 6GB, 2060, etc.)
+            # Low-end GPU (3060 6GB, 2060, RX 6600, etc.)
             defaults.update({
                 "batch_size": 2,
                 "fp16": True,
@@ -233,7 +242,7 @@ def get_optimal_training_defaults(device: str | None = None) -> dict:
                 "gradient_checkpointing": True,
             })
         else:
-            # Very low VRAM — recommend QLoRA
+            # Very low VRAM — recommend QLoRA (CUDA only) or small LoRA
             defaults.update({
                 "batch_size": 1,
                 "fp16": True,
@@ -241,8 +250,9 @@ def get_optimal_training_defaults(device: str | None = None) -> dict:
                 "max_tokens": 256,
                 "gradient_accumulation_steps": 16,
                 "gradient_checkpointing": True,
-                "method": "qlora",
             })
+            if not is_rocm:
+                defaults["method"] = "qlora"  # QLoRA only on NVIDIA
 
     elif device == "mps":
         # Apple Silicon — no fp16/bf16 via the flags, PyTorch handles it

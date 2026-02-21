@@ -188,7 +188,8 @@ def _dir_size_gb(path: Path) -> float:
     try:
         total = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
         return round(total / (1024 ** 3), 3)
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed to calculate dir size for %s: %s", path, e)
         return 0.0
 
 

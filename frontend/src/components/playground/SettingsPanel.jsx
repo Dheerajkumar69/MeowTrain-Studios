@@ -33,7 +33,7 @@ export default function SettingsPanel({
     useEffect(() => {
         if (showTemplates && !templatesLoaded) {
             setTemplatesLoaded(true);
-            inferenceAPI.listPrompts(projectId).then((res) => setTemplates(res.data)).catch(() => {});
+            inferenceAPI.listPrompts(projectId).then((res) => setTemplates(res.data)).catch(() => { });
         }
     }, [showTemplates, templatesLoaded, projectId]);
 
@@ -47,7 +47,8 @@ export default function SettingsPanel({
                     setSelectedLmsModel(res.data.models[0].model_id);
                 }
             }
-        } catch {
+        } catch (err) {
+            console.debug('LM Studio model list failed:', err.message || err);
             setLmsConnected(false);
             setLmsModels([]);
         }
@@ -99,7 +100,7 @@ export default function SettingsPanel({
             });
             setTemplates((prev) => [...prev, res.data]);
             setTemplateName('');
-        } catch { /* silently ignore */ }
+        } catch (err) { console.debug('Template save failed:', err.message || err); }
     };
 
     const loadTemplate = (t) => {

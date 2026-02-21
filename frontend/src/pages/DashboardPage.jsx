@@ -73,7 +73,8 @@ export default function DashboardPage() {
                 const res = await hardwareAPI.status();
                 setHardware(res.data);
                 setHwError(false);
-            } catch {
+            } catch (hwErr) {
+                console.debug('Hardware poll failed:', hwErr.message || hwErr);
                 setHwError(true);
             }
         };
