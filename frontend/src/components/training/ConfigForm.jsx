@@ -54,14 +54,13 @@ export default function ConfigForm({
                 <p className="text-sm text-surface-500 mt-1">
                     Adjust how your model learns. Safe defaults are pre-selected.
                     {deviceInfo && (
-                        <span className={`ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
-                            deviceInfo.training_device === 'cuda' ? 'bg-green-100 text-green-700' :
+                        <span className={`ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${deviceInfo.training_device === 'cuda' ? 'bg-green-100 text-green-700' :
                             deviceInfo.training_device === 'mps' ? 'bg-purple-100 text-purple-700' :
-                            'bg-yellow-100 text-yellow-700'
-                        }`}>
+                                'bg-yellow-100 text-yellow-700'
+                            }`}>
                             <Cpu className="w-3 h-3" />
                             {deviceInfo.training_device === 'cuda' ? `GPU · ${deviceInfo.gpu_name?.replace('NVIDIA ', '') || 'CUDA'}` :
-                             deviceInfo.training_device === 'mps' ? 'Apple Silicon' : 'CPU Mode'}
+                                deviceInfo.training_device === 'mps' ? 'Apple Silicon' : 'CPU Mode'}
                         </span>
                     )}
                 </p>
@@ -450,7 +449,7 @@ export default function ConfigForm({
                         const res = await trainingAPI.history(projectId);
                         setRunHistory(res.data.runs || []);
                         setShowComparison(!showComparison);
-                    } catch (e) { toast.error('Failed to load run history'); }
+                    } catch { toast.error('Failed to load run history'); }
                 }}
                 className="w-full py-2.5 bg-surface-50 border border-surface-200 text-surface-600 rounded-2xl text-sm font-medium hover:bg-surface-100 transition-all flex items-center justify-center gap-2"
             >

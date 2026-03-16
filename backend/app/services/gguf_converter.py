@@ -247,12 +247,25 @@ def export_project_gguf(
         model_source = None
 
         # Check for merged output first
-        if output_dir.exists() and any(output_dir.glob("*.safetensors")):
-            model_source = str(output_dir)
-            logger.info("Using merged output model: %s", model_source)
-        elif output_dir.exists() and any(output_dir.glob("*.bin")):
-            model_source = str(output_dir)
-        elif adapters_dir.exists() and any(adapters_dir.iterdir()):
+        # CheckpointManager saves to output/run_N/ (subdir layout)
+        if output_dir.exists():
+            # First check for run_N subdirectories (current layout)
+            run_dirs = sorted(
+                [d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith("run_")],
+                key=lambda d: d.name,
+                reverse=True,
+            )
+            for rd in run_dirs:
+                if any(rd.glob("*.safetensors")) or any(rd.glob("*.bin")):
+                    model_source = str(rd)
+                    logger.info("Using merged output model (run subdir): %s", model_source)
+                    break
+            # Fallback: direct files in output/ (legacy layout)
+            if model_source is None:
+                if any(output_dir.glob("*.safetensors")) or any(output_dir.glob("*.bin")):
+                    model_source = str(output_dir)
+                    logger.info("Using merged output model: %s", model_source)
+        if model_source is None and adapters_dir.exists() and any(adapters_dir.iterdir()):
             # Need to merge LoRA adapter first
             status_dict.update({"step": "merging", "progress": 20, "message": "Merging LoRA adapter with base model..."})
 

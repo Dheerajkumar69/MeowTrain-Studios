@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useAuth } from '../contexts/AuthContext';
-import { projectsAPI, datasetsAPI, modelsAPI, trainingAPI, inferenceAPI } from '../services/api';
+
+import { projectsAPI, datasetsAPI } from '../services/api';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import DatasetPanel from '../components/dataset/DatasetPanel';
 import DatasetPreviewPanel from '../components/dataset/DatasetPreviewPanel';
@@ -24,7 +24,7 @@ const TABS = [
 export default function ProjectPage() {
     const { id } = useParams();
     const navigate = useNavigate();
-    const { user } = useAuth();
+
     const [project, setProject] = useState(null);
     const [activeTab, setActiveTab] = useState('data');
     const [loading, setLoading] = useState(true);
@@ -33,7 +33,7 @@ export default function ProjectPage() {
     // Shared state across tabs
     const [datasets, setDatasets] = useState([]);
     const [selectedModel, setSelectedModel] = useState(null);
-    const [trainingConfig, setTrainingConfig] = useState(null);
+
 
     const loadProject = useCallback(async () => {
         setError('');

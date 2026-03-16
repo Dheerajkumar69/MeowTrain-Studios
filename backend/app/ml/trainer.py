@@ -394,8 +394,6 @@ def create_model_and_trainer(
         dataloader_num_workers=0,  # Avoid multiprocessing issues in thread
         disable_tqdm=True,  # We have our own progress tracking
         gradient_checkpointing=use_gradient_checkpointing,
-        # Use CPU offload for MPS to avoid MPS-specific OOM
-        use_mps_device=(device == "mps"),
     )
 
     # ── DeepSpeed Multi-GPU ───────────────────────────────────────
@@ -593,14 +591,21 @@ def _apply_lora(model, hyperparameters: dict):
 def _find_target_modules(model) -> list[str]:
     """
     Auto-detect linear layer names for LoRA targeting.
-    Works across LLaMA, Mistral, Phi, Gemma, etc.
+    Works across LLaMA, Mistral, Phi, Gemma, GPT-2, etc.
     """
+    import torch.nn as nn
+    try:
+        from transformers.pytorch_utils import Conv1D  # GPT-2 style layers
+    except ImportError:
+        Conv1D = None
+
     # Common attention projection names across architectures
     common_targets = [
         "q_proj", "k_proj", "v_proj", "o_proj",  # LLaMA, Mistral
         "gate_proj", "up_proj", "down_proj",       # MLP layers
         "query_key_value",                          # Some architectures
         "dense", "dense_h_to_4h", "dense_4h_to_h", # GPT-NeoX style
+        "c_attn", "c_proj", "c_fc",               # GPT-2 style
     ]
 
     # Check which modules actually exist in the model
@@ -612,9 +617,18 @@ def _find_target_modules(model) -> list[str]:
     found = [t for t in common_targets if t in model_modules]
 
     if not found:
-        # Fallback: target all Linear layers
-        logger.warning("No common target modules found — using all linear layers")
-        found = ["all-linear"]
+        # Fallback: collect the leaf names of all actual Linear / Conv1D layers
+        logger.warning("No common target modules found — scanning model for linear layers")
+        linear_types = (nn.Linear,) + ((Conv1D,) if Conv1D is not None else ())
+        leaf_names: set[str] = set()
+        for name, module in model.named_modules():
+            if isinstance(module, linear_types):
+                leaf_names.add(name.split(".")[-1])
+        found = sorted(leaf_names)
+        if not found:
+            # Last resort – let PEFT handle it (supported in newer peft versions)
+            logger.warning("No linear layers found by scan — falling back to 'all-linear'")
+            found = ["all-linear"]
 
     logger.info("LoRA target modules: %s", found)
     return found

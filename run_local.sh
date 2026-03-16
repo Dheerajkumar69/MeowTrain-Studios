@@ -121,27 +121,55 @@ fi
 [[ ! -f "$PROJECT_DIR/backend/run.py" ]] && log_error "backend/run.py not found!" && ERRORS=$((ERRORS + 1))
 [[ ! -f "$PROJECT_DIR/frontend/package.json" ]] && log_error "frontend/package.json not found!" && ERRORS=$((ERRORS + 1))
 
-# 7. Check ports
-check_port() {
+# 8. GPU / PRIME check (informational, never blocks)
+if command -v lspci &>/dev/null && lspci | grep -qi "nvidia\|radeon\|amd.*vga"; then
+    if command -v prime-select &>/dev/null; then
+        PRIME_MODE=$(prime-select query 2>/dev/null || echo "unknown")
+        if [[ "$PRIME_MODE" == "intel" ]]; then
+            log_warn "NVIDIA GPU found but PRIME is set to 'intel' — dGPU is powered off!"
+            log_warn "  GPU will NOT be used for training. To enable it:"
+            log_warn "    sudo prime-select on-demand   # then reboot"
+        elif [[ "$PRIME_MODE" == "on-demand" ]]; then
+            log_info "GPU: PRIME on-demand mode — NVIDIA dGPU available for CUDA"
+        elif [[ "$PRIME_MODE" == "nvidia" ]]; then
+            log_info "GPU: PRIME nvidia mode — NVIDIA dGPU active"
+        fi
+    elif command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        log_info "GPU: NVIDIA detected and driver is active"
+    fi
+elif command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+    log_info "GPU: NVIDIA driver active"
+fi
+
+# 7. Check ports — auto-kill anything holding our dev ports
+free_port() {
     local port=$1 name=$2
+    local pids=""
     if command -v lsof &>/dev/null; then
-        if lsof -iTCP:"$port" -sTCP:LISTEN -t &>/dev/null; then
-            local pid
-            pid=$(lsof -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)
-            log_error "Port $port ($name) already in use by PID $pid — kill it with: kill $pid"
-            return 1
-        fi
+        pids=$(lsof -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null)
     elif command -v ss &>/dev/null; then
-        if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
-            log_error "Port $port ($name) is already in use!"
+        pids=$(ss -tlnp 2>/dev/null | awk -F'pid=' "/\:${port} /{print \$2}" | cut -d, -f1)
+    fi
+    if [[ -n "$pids" ]]; then
+        log_warn "Port $port ($name) in use by PID(s) $pids — killing..."
+        echo "$pids" | xargs -r kill -9 2>/dev/null || true
+        sleep 1
+        # Verify it's free now
+        local still=""
+        if command -v lsof &>/dev/null; then
+            still=$(lsof -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null)
+        fi
+        if [[ -n "$still" ]]; then
+            log_error "Could not free port $port — try: sudo kill -9 $still"
             return 1
         fi
+        log_info "Port $port ($name) freed"
     fi
     return 0
 }
 
-check_port 8000 "Backend"  || ERRORS=$((ERRORS + 1))
-check_port 5173 "Frontend" || ERRORS=$((ERRORS + 1))
+free_port 8000 "Backend"  || ERRORS=$((ERRORS + 1))
+free_port 5173 "Frontend" || ERRORS=$((ERRORS + 1))
 
 # Bail on errors
 if [[ $ERRORS -gt 0 ]]; then

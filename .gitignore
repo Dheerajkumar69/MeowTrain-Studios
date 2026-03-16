@@ -19,9 +19,11 @@ node_modules/
 
 # ===== Data & Models =====
 data/
+models/
 *.db
 *.db-wal
 *.db-shm
+*.db.bak
 test_security.db
 *.sqlite3
 *.gguf

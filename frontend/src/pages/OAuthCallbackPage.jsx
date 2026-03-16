@@ -13,35 +13,25 @@ export default function OAuthCallbackPage() {
     const [searchParams] = useSearchParams();
     const navigate = useNavigate();
     const { refreshUser } = useAuth();
-    const [error, setError] = useState('');
+    const [error] = useState(() => {
+        const err = searchParams.get('error');
+        if (err) return err;
+        const token = searchParams.get('token');
+        if (!token) return 'No authentication token received.';
+        const jwtParts = token.split('.');
+        if (jwtParts.length !== 3 || jwtParts.some(part => part.length === 0)) {
+            return 'Invalid authentication token received. Please try logging in again.';
+        }
+        const isBase64url = (s) => /^[A-Za-z0-9_-]+$/.test(s);
+        if (!jwtParts.every(isBase64url)) {
+            return 'Malformed authentication token. Please try logging in again.';
+        }
+        return '';
+    });
 
     useEffect(() => {
         const token = searchParams.get('token');
-        const err = searchParams.get('error');
-
-        if (err) {
-            setError(err);
-            return;
-        }
-
-        if (!token) {
-            setError('No authentication token received.');
-            return;
-        }
-
-        // Validate that the token looks like a JWT (header.payload.signature)
-        const jwtParts = token.split('.');
-        if (jwtParts.length !== 3 || jwtParts.some(part => part.length === 0)) {
-            setError('Invalid authentication token received. Please try logging in again.');
-            return;
-        }
-
-        // Verify each segment is valid Base64url
-        const isBase64url = (s) => /^[A-Za-z0-9_-]+$/.test(s);
-        if (!jwtParts.every(isBase64url)) {
-            setError('Malformed authentication token. Please try logging in again.');
-            return;
-        }
+        if (!token || error) return;
 
         // Store token and redirect
         localStorage.setItem('meowllm_token', token);
@@ -50,7 +40,7 @@ export default function OAuthCallbackPage() {
         }).catch(() => {
             navigate('/', { replace: true });
         });
-    }, [searchParams, navigate, refreshUser]);
+    }, [searchParams, navigate, refreshUser, error]);
 
     return (
         <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary-50 via-surface-0 to-primary-100 p-4">

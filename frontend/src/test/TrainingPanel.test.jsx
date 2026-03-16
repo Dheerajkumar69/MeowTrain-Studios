@@ -3,7 +3,7 @@
  * Verifies training controls, status display, and configuration form.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import React from 'react';
 
@@ -38,20 +38,8 @@ describe('TrainingPanel', () => {
     });
 
     it('component can be imported', async () => {
-        let imported = false;
-        try {
-            await import('../components/training/TrainingPanel');
-            imported = true;
-        } catch {
-            // Try alternate path
-            try {
-                await import('../components/TrainingPanel');
-                imported = true;
-            } catch {
-                // Not found
-            }
-        }
-        expect(imported).toBe(true);
+        const mod = await import('../components/training/TrainingPanel');
+        expect(mod.default).toBeDefined();
     });
 
     it('ExportPanel component can be imported', async () => {

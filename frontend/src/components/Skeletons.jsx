@@ -72,6 +72,7 @@ export function DashboardSkeleton() {
 }
 
 // ===== Empty states =====
+// eslint-disable-next-line no-unused-vars
 export function EmptyState({ icon: Icon = Cat, title, description, action }) {
     return (
         <div className="flex flex-col items-center justify-center py-16 text-center">

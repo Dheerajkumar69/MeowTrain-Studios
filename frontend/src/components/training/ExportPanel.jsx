@@ -45,7 +45,7 @@ export default function ExportPanel({ projectId, setError }) {
                         ggufPollRef.current = null;
                         setGgufExporting(false);
                     }
-                } catch (pollErr) {
+                } catch {
                     clearInterval(ggufPollRef.current);
                     ggufPollRef.current = null;
                     setGgufExporting(false);
@@ -66,7 +66,7 @@ export default function ExportPanel({ projectId, setError }) {
             a.download = `meowllm-model.gguf`;
             a.click();
             window.URL.revokeObjectURL(url);
-        } catch (err) {
+        } catch {
             setError('GGUF download failed');
         }
     };

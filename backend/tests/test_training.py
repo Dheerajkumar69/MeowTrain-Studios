@@ -42,7 +42,9 @@ class TestTrainingConfigure:
 class TestTrainingStatus:
     def test_status_no_runs(self, client, auth_headers, project_id):
         resp = client.get(f"/api/projects/{project_id}/train/status", headers=auth_headers)
-        assert resp.status_code == 404
+        # Returns 200 with idle status — frontend polls this before training starts
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "idle"
 
     def test_status_after_configure(self, client, auth_headers, project_id):
         # Upload data and configure

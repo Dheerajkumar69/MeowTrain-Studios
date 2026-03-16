@@ -5,7 +5,7 @@ class TestRegister:
     def test_register_success(self, client):
         resp = client.post("/api/auth/register", json={
             "email": "user@test.com",
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
             "display_name": "New User",
         })
         assert resp.status_code == 200
@@ -18,11 +18,11 @@ class TestRegister:
     def test_register_duplicate_email(self, client):
         client.post("/api/auth/register", json={
             "email": "dup@test.com",
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
         })
         resp = client.post("/api/auth/register", json={
             "email": "dup@test.com",
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
         })
         assert resp.status_code == 400
         assert "already registered" in resp.json()["detail"].lower()
@@ -40,16 +40,14 @@ class TestRegister:
             "email": "weak@test.com",
             "password": "NoDigitsHereX",  # Long enough but no digit
         })
-        assert resp.status_code == 400
-        assert "digit" in resp.json()["detail"]
+        assert resp.status_code == 422  # Pydantic field_validator catches before route
 
     def test_register_weak_password_no_letter(self, client):
         resp = client.post("/api/auth/register", json={
             "email": "weak@test.com",
             "password": "1234567890",  # Long enough but no letter
         })
-        assert resp.status_code == 400
-        assert "letter" in resp.json()["detail"]
+        assert resp.status_code == 422  # Pydantic field_validator catches before route
 
 
 class TestLogin:
@@ -57,11 +55,11 @@ class TestLogin:
         # Register first
         client.post("/api/auth/register", json={
             "email": "login@test.com",
-            "password": "LoginPass1",
+            "password": "LoginPass1!",
         })
         resp = client.post("/api/auth/login", json={
             "email": "login@test.com",
-            "password": "LoginPass1",
+            "password": "LoginPass1!",
         })
         assert resp.status_code == 200
         assert "token" in resp.json()
@@ -69,18 +67,18 @@ class TestLogin:
     def test_login_wrong_password(self, client):
         client.post("/api/auth/register", json={
             "email": "login@test.com",
-            "password": "CorrectPass1",
+            "password": "CorrectPass1!",
         })
         resp = client.post("/api/auth/login", json={
             "email": "login@test.com",
-            "password": "WrongPass1",
+            "password": "WrongPass1!",
         })
         assert resp.status_code == 401
 
     def test_login_nonexistent_user(self, client):
         resp = client.post("/api/auth/login", json={
             "email": "nobody@test.com",
-            "password": "Whatever1",
+            "password": "Whatever1!",
         })
         assert resp.status_code == 401
 

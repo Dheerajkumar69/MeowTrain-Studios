@@ -3,7 +3,7 @@
  * Verifies rendering, project listing, navigation, and empty states.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import React, { Suspense } from 'react';
 
@@ -19,6 +19,17 @@ vi.mock('../services/api', () => ({
         create: vi.fn(),
         delete: vi.fn(),
     },
+    hardwareAPI: {
+        status: vi.fn().mockResolvedValue({ data: {} }),
+        deviceInfo: vi.fn().mockResolvedValue({ data: { device: 'cpu', gpu_name: null } }),
+        refreshDevice: vi.fn().mockResolvedValue({ data: {} }),
+    },
+    trainingAPI: {
+        status: vi.fn().mockResolvedValue({ data: { status: 'idle' } }),
+    },
+    modelsAPI: {
+        list: vi.fn().mockResolvedValue({ data: [] }),
+    },
 }));
 
 // Mock the auth context
@@ -28,6 +39,12 @@ vi.mock('../contexts/AuthContext', () => ({
         isAuthenticated: true,
         logout: vi.fn(),
     }),
+}));
+
+// Mock Toast context so DashboardPage's useToast() doesn't throw
+vi.mock('../components/Toast', () => ({
+    useToast: () => ({ addToast: vi.fn() }),
+    ToastProvider: ({ children }) => children,
 }));
 
 // Lazy import the page (same as App.jsx does)

@@ -42,18 +42,18 @@ class TestAuthExtended:
         """Register with uppercase email, login with lowercase."""
         client.post("/api/auth/register", json={
             "email": "CasE@Test.COM",
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
         })
         resp = client.post("/api/auth/login", json={
             "email": "case@test.com",
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
         })
         assert resp.status_code == 200
 
     def test_register_strips_whitespace_from_name(self, client):
         resp = client.post("/api/auth/register", json={
             "email": "strip@test.com",
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
             "display_name": "  Padded Name  ",
         })
         assert resp.status_code == 200
@@ -141,7 +141,7 @@ class TestAuthExtended:
 
     def test_register_missing_email(self, client):
         resp = client.post("/api/auth/register", json={
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
         })
         assert resp.status_code == 422
 
@@ -216,7 +216,7 @@ class TestProjectsExtended:
         # User A
         resp_a = client.post("/api/auth/register", json={
             "email": "userA@test.com",
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
         })
         headers_a = {"Authorization": f"Bearer {resp_a.json()['token']}"}
         proj_a = client.post("/api/projects/", json={"name": "A's Project"}, headers=headers_a)
@@ -225,7 +225,7 @@ class TestProjectsExtended:
         # User B
         resp_b = client.post("/api/auth/register", json={
             "email": "userB@test.com",
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
         })
         headers_b = {"Authorization": f"Bearer {resp_b.json()['token']}"}
 
@@ -484,7 +484,7 @@ class TestSecurityHeaders:
         assert resp.headers.get("Referrer-Policy") == "strict-origin-when-cross-origin"
         assert "camera=()" in resp.headers.get("Permissions-Policy", "")
         assert resp.headers.get("Cache-Control") == "no-store"
-        assert "default-src 'none'" in resp.headers.get("Content-Security-Policy", "")
+        assert "default-src 'self'" in resp.headers.get("Content-Security-Policy", "")
 
     def test_request_id_propagated(self, client):
         """Custom X-Request-ID should be echoed back."""
@@ -771,7 +771,7 @@ class TestModelExportExtended:
         """Exporting another user's project should fail."""
         other = client.post("/api/auth/register", json={
             "email": "other@test.com",
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
         })
         other_headers = {"Authorization": f"Bearer {other.json()['token']}"}
         resp = client.get(f"/api/models/export/{project_id}", headers=other_headers)

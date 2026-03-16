@@ -24,7 +24,13 @@ DATA_DIR = Path(os.getenv("MEOWLLM_DATA_DIR", "./data"))
 PROJECTS_DIR = DATA_DIR / "projects"
 MODEL_CACHE_DIR = DATA_DIR / "model_cache"
 
-for d in (DATA_DIR, PROJECTS_DIR, MODEL_CACHE_DIR):
+# Dedicated models folder — user-facing store for downloaded models.
+# Can be overridden via MEOWLLM_MODELS_DIR env var (use absolute path for
+# a location outside the project, e.g. /mnt/storage/models).
+_default_models_dir = Path(__file__).resolve().parent.parent.parent / "models"
+MODELS_DIR = Path(os.getenv("MEOWLLM_MODELS_DIR", str(_default_models_dir)))
+
+for d in (DATA_DIR, PROJECTS_DIR, MODEL_CACHE_DIR, MODELS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 # ===== Security =====

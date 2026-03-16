@@ -9,7 +9,7 @@ import {
     Cat, Plus, FolderOpen, Cpu, MemoryStick, HardDrive,
     LogOut, Search, Bot, Code, MessageCircle, Wand2, Trash2,
     Clock, Database, ChevronRight, Sparkles, Settings,
-    Thermometer, Flame, Activity, Gauge, ShieldOff
+    Thermometer, Flame, Activity, Gauge, ShieldOff, AlertTriangle
 } from 'lucide-react';
 
 const USE_ICONS = { chatbot: <Bot className="w-5 h-5" />, code: <Code className="w-5 h-5" />, qa: <MessageCircle className="w-5 h-5" />, custom: <Wand2 className="w-5 h-5" /> };
@@ -36,10 +36,10 @@ export default function DashboardPage() {
     const toast = useToast();
     const [projects, setProjects] = useState([]);
     const [hardware, setHardware] = useState(null);
+    const [deviceInfo, setDeviceInfo] = useState(null);
     const [showModal, setShowModal] = useState(false);
     const [search, setSearch] = useState('');
     const [loading, setLoading] = useState(true);
-    const [hwError, setHwError] = useState(false);
     const hwPollRef = useRef(null);
     const [deleteTarget, setDeleteTarget] = useState(null);
     const [showRevokeConfirm, setShowRevokeConfirm] = useState(false);
@@ -72,15 +72,20 @@ export default function DashboardPage() {
             try {
                 const res = await hardwareAPI.status();
                 setHardware(res.data);
-                setHwError(false);
             } catch (hwErr) {
                 console.debug('Hardware poll failed:', hwErr.message || hwErr);
-                setHwError(true);
             }
         };
         pollHardware();
         hwPollRef.current = setInterval(pollHardware, 3000);
         return () => clearInterval(hwPollRef.current);
+    }, []);
+
+    // Fetch device config once (GPU mode, PRIME info)
+    useEffect(() => {
+        hardwareAPI.deviceInfo()
+            .then(res => setDeviceInfo(res.data))
+            .catch(() => { }); // non-critical
     }, []);
 
     const createProject = async (e) => {
@@ -309,8 +314,23 @@ export default function DashboardPage() {
                                         </>
                                     ) : (
                                         <>
-                                            <p className="text-sm font-semibold text-surface-900">No GPU detected</p>
-                                            <p className="text-xs text-surface-500 mt-1">CPU mode will be used</p>
+                                            {deviceInfo?.prime_blocked ? (
+                                                <>
+                                                    <p className="text-sm font-semibold text-amber-700 flex items-center gap-1.5">
+                                                        <AlertTriangle className="w-4 h-4" /> dGPU powered off
+                                                    </p>
+                                                    <p className="text-xs text-amber-600 mt-1 leading-snug">
+                                                        PRIME is set to <strong>intel</strong>. Run:<br />
+                                                        <code className="bg-amber-100 px-1 rounded">sudo prime-select on-demand</code><br />
+                                                        then <strong>reboot</strong> to enable RTX training.
+                                                    </p>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <p className="text-sm font-semibold text-surface-900">No GPU detected</p>
+                                                    <p className="text-xs text-surface-500 mt-1">CPU mode will be used</p>
+                                                </>
+                                            )}
                                         </>
                                     )}
                                 </div>

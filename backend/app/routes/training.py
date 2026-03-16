@@ -190,8 +190,17 @@ def start_training(
     worker.start()
 
     # Persist the worker PID for orphan recovery after server restart
-    run.worker_pid = worker.pid
-    db.commit()
+    # (worker_pid column may not exist on older DBs — fail-safe)
+    try:
+        if hasattr(run, "worker_pid"):
+            run.worker_pid = worker.pid
+            db.commit()
+    except Exception as pid_err:
+        logger.warning("Could not persist worker PID (non-fatal): %s", pid_err)
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
     return {"detail": "Training started", "run_id": run.id}
 
@@ -342,7 +351,17 @@ def training_status(
         .first()
     )
     if not run:
-        raise HTTPException(status_code=404, detail="No training runs found.")
+        # Return an idle status instead of 404 — the frontend polls this
+        # endpoint before any training is configured.
+        return TrainingStatusResponse(
+            id=0,
+            status="idle",
+            current_epoch=0,
+            total_epochs=0,
+            current_step=0,
+            total_steps=0,
+            tokens_per_sec=0.0,
+        )
     return TrainingStatusResponse.model_validate(run)
 
 

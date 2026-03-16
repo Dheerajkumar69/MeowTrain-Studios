@@ -6,15 +6,11 @@ import { Cat, CheckCircle, AlertTriangle, Loader2 } from 'lucide-react';
 export default function VerifyEmailPage() {
     const [searchParams] = useSearchParams();
     const token = searchParams.get('token');
-    const [status, setStatus] = useState('verifying'); // verifying | success | error
-    const [message, setMessage] = useState('');
+    const [status, setStatus] = useState(() => token ? 'verifying' : 'error');
+    const [message, setMessage] = useState(() => token ? '' : 'No verification token found. Please check your email link.');
 
     useEffect(() => {
-        if (!token) {
-            setStatus('error');
-            setMessage('No verification token found. Please check your email link.');
-            return;
-        }
+        if (!token) return;
 
         const verify = async () => {
             try {

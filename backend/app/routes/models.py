@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
-from fastapi import APIRouter, Depends, HTTPException, Header, BackgroundTasks, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Header, BackgroundTasks, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -23,7 +23,7 @@ from app.schemas import (
     ModelInfo, ModelStatusResponse, DownloadStartResponse,
     DownloadProgressResponse, DetailResponse, GGUFExportResponse, GGUFStatusResponse,
 )
-from app.config import MODEL_CATALOG, MODEL_CACHE_DIR, PROJECTS_DIR
+from app.config import MODEL_CATALOG, MODEL_CACHE_DIR, PROJECTS_DIR, MODELS_DIR
 from app.services.hardware_service import get_hardware_status
 from app.services.auth_service import get_user_from_header
 
@@ -39,6 +39,8 @@ from app.routes.models_helpers import (
     check_compatibility,
     is_model_cached,
     validate_snapshot_dir,
+    validate_flat_model_dir,
+    get_model_local_path,
     get_disk_free_gb,
     check_hf_reachable,
     hf_api_call_with_retry,
@@ -66,12 +68,15 @@ _cleanup_stale_tasks = cleanup_stale_tasks
 _check_compatibility = check_compatibility
 _is_model_cached = is_model_cached
 _validate_snapshot_dir = validate_snapshot_dir
+_validate_flat_model_dir = validate_flat_model_dir
+_get_model_local_path = get_model_local_path
 _get_disk_free_gb = get_disk_free_gb
 _check_hf_reachable = check_hf_reachable
 _hf_api_call_with_retry = hf_api_call_with_retry
 
-# Note: In-memory locks removed — DB-backed BackgroundTask model provides
-# cross-process safe task management (works with gunicorn -w N).
+# Note: DB-backed BackgroundTask model provides cross-process safe task management
+# (works with gunicorn -w N). _download_lock guards in-thread state initialization.
+_download_lock = threading.Lock()
 _DOWNLOAD_TTL_LOCAL = _DOWNLOAD_TTL  # Alias for local reference
 
 # ── Constants ───────────────────────────────────────────────────────
@@ -276,154 +281,33 @@ def _check_compatibility(model: dict, hw: dict) -> str:
         return "too_large"
 
 
-def _is_model_cached(model_id: str, *, deep_check: bool = False) -> bool:
-    """Check if a model is already cached locally with integrity validation.
-    
-    A cached model is valid only if:
-    1. The snapshot directory exists with at least one snapshot
-    2. The snapshot contains required files (config.json at minimum)
-    3. optionally (deep_check): files are non-empty and not truncated
-    """
-    model_dir_name = "models--" + model_id.replace("/", "--")
-    
-    # Check HuggingFace cache first
-    hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
-    hf_model_dir = os.path.join(hf_cache, model_dir_name)
-    if os.path.isdir(hf_model_dir):
-        if _validate_snapshot_dir(hf_model_dir, deep_check=deep_check):
-            return True
-    
-    # Check app-local model cache
-    app_model_dir = MODEL_CACHE_DIR / model_dir_name
-    if app_model_dir.is_dir():
-        if _validate_snapshot_dir(str(app_model_dir), deep_check=deep_check):
-            return True
-    
-    return False
 
 
-def _validate_snapshot_dir(model_dir: str, *, deep_check: bool = False) -> bool:
-    """Validate that a model cache directory has a complete snapshot."""
-    try:
-        snapshots_dir = os.path.join(model_dir, "snapshots")
-        if not os.path.isdir(snapshots_dir):
-            return False
-        
-        snapshots = [d for d in os.listdir(snapshots_dir) 
-                     if os.path.isdir(os.path.join(snapshots_dir, d))]
-        if not snapshots:
-            return False
-        
-        # Use the most recent snapshot (sorted by name = hash)
-        latest_snapshot = os.path.join(snapshots_dir, snapshots[-1])
-        snapshot_files = set(os.listdir(latest_snapshot))
-        
-        if not snapshot_files:
-            logger.warning("Empty snapshot directory: %s", latest_snapshot)
-            return False
-        
-        # Check required files exist
-        missing = _REQUIRED_SNAPSHOT_FILES - snapshot_files
-        if missing:
-            logger.warning("Snapshot missing required files %s: %s", missing, latest_snapshot)
-            return False
-        
-        if deep_check:
-            # Verify files are non-empty (catches truncated downloads)
-            for fname in snapshot_files:
-                fpath = os.path.join(latest_snapshot, fname)
-                if os.path.isfile(fpath):
-                    size = os.path.getsize(fpath)
-                    if size == 0:
-                        logger.warning("Empty file in snapshot: %s", fpath)
-                        return False
-            
-            # Verify config.json is valid JSON
-            config_path = os.path.join(latest_snapshot, "config.json")
-            if os.path.isfile(config_path):
-                try:
-                    import json
-                    with open(config_path, "r") as f:
-                        json.load(f)
-                except (json.JSONDecodeError, OSError) as e:
-                    logger.warning("Corrupt config.json in snapshot: %s (%s)", config_path, e)
-                    return False
-        
-        return True
-    except OSError as e:
-        logger.debug("Error validating snapshot %s: %s", model_dir, e)
-        return False
 
-
-def _get_disk_free_gb() -> float:
-    """Get free disk space in GB where models are cached."""
-    try:
-        # Check the HuggingFace cache partition
-        hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
-        os.makedirs(hf_cache, exist_ok=True)
-        usage = shutil.disk_usage(hf_cache)
-        return round(usage.free / (1024 ** 3), 2)
-    except OSError:
-        try:
-            usage = shutil.disk_usage("/")
-            return round(usage.free / (1024 ** 3), 2)
-        except OSError:
-            return 0.0
-
-
-def _check_hf_reachable() -> tuple[bool, str]:
-    """Quick connectivity check to HuggingFace Hub. Returns (reachable, message)."""
-    try:
-        req = Request("https://huggingface.co/api/models?limit=1", method="HEAD")
-        req.add_header("User-Agent", "MeowTrain/1.0")
-        with urlopen(req, timeout=10) as resp:
-            if resp.status < 400:
-                return True, "HuggingFace Hub reachable"
-            return False, f"HuggingFace returned HTTP {resp.status}"
-    except URLError as e:
-        reason = str(getattr(e, "reason", e))
-        if "SSL" in reason or "certificate" in reason.lower():
-            return False, "SSL/TLS error connecting to HuggingFace. Check system certificates."
-        return False, f"Cannot reach HuggingFace Hub: {reason}"
-    except Exception as e:
-        return False, f"Cannot reach HuggingFace Hub: {e}"
-
-
-def _hf_api_call_with_retry(fn, *args, max_retries: int = _HF_MAX_RETRIES, **kwargs):
-    """Call a HuggingFace Hub API function with retry logic for transient failures."""
-    last_error = None
-    for attempt in range(max_retries):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            last_error = e
-            error_str = str(e)
-            # Don't retry on permanent errors
-            if any(code in error_str for code in ("401", "403", "404", "422")):
-                raise
-            # Retry on transient errors (429, 500, 502, 503, timeout)
-            if attempt < max_retries - 1:
-                wait = (2 ** attempt) + 0.5  # 1.5s, 2.5s, 4.5s
-                logger.info("HF API attempt %d/%d failed (%s), retrying in %.1fs...",
-                           attempt + 1, max_retries, error_str[:80], wait)
-                time.sleep(wait)
-    raise last_error
-
-
-def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: float = 0.0):
+def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: float = 0.0, download_path: str | None = None):
     """Background thread that downloads a model from HuggingFace Hub.
     
     Hardened with:
-    - Disk space pre-check (with headroom)
+    - Explicit download_path support (flat local_dir format, no HF symlinks)
+    - Automatic fallback to HF cache if local_dir download fails
+    - Disk space pre-check at the target location (with headroom)
     - HuggingFace connectivity check before starting
+    - Up to 3 download retry attempts with exponential back-off
     - Real-time progress with download speed
     - Cancellation watchdog via DB polling
-    - Post-download integrity verification
+    - Post-download integrity verification (config.json parse + empty-file scan)
     - Partial download cleanup on failure
     - Detailed error categorization & user-friendly messages
     """
     download_start_time = time.time()
     local_path = None
+
+    # Resolve target directory — default = MODELS_DIR/<org--model>
+    model_safe_name = model_id.replace("/", "--")
+    if download_path:
+        target_dir = str(download_path)
+    else:
+        target_dir = str(MODELS_DIR / model_safe_name)
     
     try:
         with _download_lock:
@@ -435,7 +319,7 @@ def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: fl
         # ── Step 1: Connectivity check ───────────────────────────────
         _update_task("download", model_id,
                      progress=1.0,
-                     message=f"Checking HuggingFace connectivity...")
+                     message="Checking HuggingFace connectivity...")
         
         reachable, reason = _check_hf_reachable()
         if not reachable:
@@ -445,15 +329,15 @@ def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: fl
                          error=reason)
             return
 
-        # ── Step 2: Disk space check ─────────────────────────────────
+        # ── Step 2: Disk space check at target location ──────────────
         if estimated_size_gb > 0:
-            free_gb = _get_disk_free_gb()
+            free_gb = _get_disk_free_gb(target_dir)
             required_gb = estimated_size_gb + _DISK_HEADROOM_GB
             if free_gb < required_gb:
                 error_msg = (
-                    f"Not enough disk space for {model_name}. "
+                    f"Not enough disk space for {model_name} at '{target_dir}'. "
                     f"Need ~{required_gb:.1f} GB but only {free_gb:.1f} GB free. "
-                    f"Free up {required_gb - free_gb:.1f} GB or delete unused model caches."
+                    f"Free up {required_gb - free_gb:.1f} GB or choose a different location."
                 )
                 _finish_task("download", model_id,
                              status="error",
@@ -471,27 +355,44 @@ def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: fl
             snapshot_download = _hf_hub().snapshot_download
             from tqdm.auto import tqdm as _tqdm_base
         except ImportError as e:
-            error_msg = f"Missing dependency: {e}. Run: pip install huggingface-hub"
+            error_msg = f"Missing dependency: {e}. Run: pip install huggingface-hub tqdm"
             _finish_task("download", model_id, status="error",
                          message=error_msg, error=error_msg)
             return
 
         hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 
+        # Ensure the target directory exists and is writable
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+            # Quick writable test
+            _test_file = os.path.join(target_dir, ".meowtrain_write_test")
+            with open(_test_file, "w") as _tf:
+                _tf.write("ok")
+            os.remove(_test_file)
+        except OSError as e:
+            error_msg = (
+                f"Cannot write to download directory '{target_dir}': {e}. "
+                f"Check permissions or choose a different location."
+            )
+            _finish_task("download", model_id, status="error",
+                         message=error_msg, error=error_msg)
+            return
+
         _update_task("download", model_id,
                      progress=5.0,
-                     message=f"Downloading {model_name} from HuggingFace...")
+                     message=f"Downloading {model_name} from HuggingFace → {target_dir}...")
 
-        logger.info("Starting download: %s (est. %.1f GB, %.1f GB free)",
-                    model_id, estimated_size_gb, _get_disk_free_gb())
+        logger.info("Starting download: %s → %s (est. %.1f GB, %.1f GB free)",
+                    model_id, target_dir, estimated_size_gb, _get_disk_free_gb(target_dir))
 
         # ── Real-time progress tracking via custom tqdm class ────────
         _progress_state = {
             "downloaded": 0,
             "total": 0,
             "last_db_update": 0.0,
-            "file_totals": {},   # tqdm-id → total bytes for that bar
-            "file_done": {},     # tqdm-id → bytes downloaded so far
+            "file_totals": {},
+            "file_done": {},
             "files_completed": 0,
             "files_total": 0,
         }
@@ -501,26 +402,69 @@ def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: fl
             """tqdm wrapper that reports aggregate download progress to the DB."""
 
             def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                bar_id = id(self)
-                if self.total and self.total > 0:
-                    _progress_state["file_totals"][bar_id] = self.total
-                    _progress_state["file_done"][bar_id] = 0
-                    _progress_state["total"] = sum(_progress_state["file_totals"].values())
-                    _progress_state["files_total"] += 1
+                # huggingface_hub ≥1.x passes a 'name' kwarg to identify the
+                # operation (e.g. 'huggingface_hub.snapshot_download').  Standard
+                # tqdm does not accept 'name', so we drop it and any other
+                # unexpected kwargs silently rather than crashing.
+                kwargs.pop('name', None)
+                # Drop any other kwargs tqdm doesn't know about
+                import inspect as _inspect
+                _tqdm_params = set(_inspect.signature(_tqdm_base.__init__).parameters)
+                kwargs = {k: v for k, v in kwargs.items() if k in _tqdm_params}
+                try:
+                    super().__init__(*args, **kwargs)
+                except Exception:
+                    # Fallback: call without filtered kwargs
+                    super().__init__()
+
+                # ── CRITICAL: ensure tqdm internals are never None ──
+                # huggingface_hub._snapshot_download does
+                #     bytes_progress.total += total
+                # which crashes with "NoneType += int" when self.total is None.
+                # This happens when __init__ falls back to no-args mode or
+                # when kwarg filtering drops the 'total' parameter.
+                if getattr(self, 'n', None) is None:
+                    self.n = 0
+                if getattr(self, 'total', None) is None:
+                    self.total = 0
+                if getattr(self, 'last_print_n', None) is None:
+                    self.last_print_n = 0
+
+                try:
+                    bar_id = id(self)
+                    total = getattr(self, 'total', None)
+                    if total is not None and total > 0:
+                        _progress_state["file_totals"][bar_id] = int(total)
+                        _progress_state["file_done"][bar_id] = 0
+                        _progress_state["total"] = sum(
+                            v for v in _progress_state["file_totals"].values() if v is not None
+                        )
+                        _progress_state["files_total"] = (_progress_state.get("files_total") or 0) + 1
+                except Exception as e:
+                    logger.debug("Progress tracker init error (non-fatal): %s", e)
 
             def update(self, n=1):
-                super().update(n)
-                bar_id = id(self)
-                if bar_id in _progress_state["file_done"]:
-                    _progress_state["file_done"][bar_id] += n
-                    _progress_state["downloaded"] = sum(_progress_state["file_done"].values())
+                try:
+                    super().update(n)
+                except Exception:
+                    pass
+                try:
+                    if n is None:
+                        return
+                    n = int(n)
+                    bar_id = id(self)
+                    if bar_id not in _progress_state["file_done"]:
+                        return
+                    _progress_state["file_done"][bar_id] = (_progress_state["file_done"].get(bar_id) or 0) + n
+                    _progress_state["downloaded"] = sum(
+                        v for v in _progress_state["file_done"].values() if v is not None
+                    )
 
                     now = time.time()
                     if now - _progress_state["last_db_update"] >= _DB_UPDATE_INTERVAL:
                         _progress_state["last_db_update"] = now
-                        total = _progress_state["total"]
-                        done = _progress_state["downloaded"]
+                        total = _progress_state.get("total") or 0
+                        done = _progress_state.get("downloaded") or 0
                         if total > 0:
                             pct = 5.0 + (done / total) * 85.0  # 5–90%
                             done_mb = done / (1024 * 1024)
@@ -543,14 +487,22 @@ def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: fl
                                     f"({pct:.0f}%) • {speed_mbps:.1f} MB/s{eta_str}"
                                 ),
                             )
+                except Exception as e:
+                    logger.debug("Progress tracker update error (non-fatal): %s", e)
 
             def close(self):
-                bar_id = id(self)
-                if bar_id in _progress_state["file_done"]:
-                    _progress_state["files_completed"] += 1
-                super().close()
-                _progress_state["file_totals"].pop(bar_id, None)
-                _progress_state["file_done"].pop(bar_id, None)
+                try:
+                    bar_id = id(self)
+                    if bar_id in _progress_state.get("file_done", {}):
+                        _progress_state["files_completed"] = (_progress_state.get("files_completed") or 0) + 1
+                except Exception:
+                    pass
+                try:
+                    super().close()
+                except Exception:
+                    pass
+                _progress_state.get("file_totals", {}).pop(id(self), None)
+                _progress_state.get("file_done", {}).pop(id(self), None)
 
         # ── Cancellation watchdog ────────────────────────────────────
         cancel_event = threading.Event()
@@ -579,14 +531,13 @@ def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: fl
                     cancel_event.set()
                     logger.info("Download cancellation detected for %s", model_id)
                     break
-                # Also check disk space during download
-                free_gb = _get_disk_free_gb()
+                free_gb = _get_disk_free_gb(target_dir)
                 if free_gb < 0.5:
                     logger.error("Disk space critically low (%.2f GB) during download of %s",
                                 free_gb, model_id)
                     _finish_task("download", model_id,
                                  status="error",
-                                 message=f"Download stopped: disk space critically low ({free_gb:.1f} GB free)",
+                                 message=f"Download stopped: disk space critically low ({free_gb:.1f} GB free) at '{target_dir}'",
                                  error="Disk full")
                     cancel_event.set()
                     break
@@ -596,16 +547,86 @@ def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: fl
                                     name=f"cancel-watch-{model_id.replace('/', '-')}")
         watchdog.start()
 
-        # ── Step 4: Download ──────────────────────────────────────────
-        local_path = snapshot_download(
-            repo_id=model_id,
-            token=hf_token,
-            ignore_patterns=[
-                "*.gguf", "*.bin", "*.msgpack",
-                "consolidated.*", "original/**",
-            ],
-            tqdm_class=_DownloadProgressTracker,
-        )
+        # ── Step 4: Download with retry ───────────────────────────────
+        # Strategy: try local_dir (flat files, no symlinks) first because it is
+        # universally loadable with from_pretrained(path).  On repeated failure
+        # fall back to the HF snapshot cache format as a last resort.
+        _MAX_DOWNLOAD_ATTEMPTS = 3
+        last_download_exc = None
+        local_path = None
+
+        for _attempt in range(1, _MAX_DOWNLOAD_ATTEMPTS + 1):
+            if cancel_event.is_set():
+                break
+            try:
+                if _attempt > 1:
+                    wait_secs = 2 ** (_attempt - 1)  # 2, 4 seconds
+                    logger.info("Download attempt %d/%d for %s (retrying in %ds)",
+                                _attempt, _MAX_DOWNLOAD_ATTEMPTS, model_id, wait_secs)
+                    _update_task("download", model_id,
+                                 message=f"Retrying download ({_attempt}/{_MAX_DOWNLOAD_ATTEMPTS})...")
+                    time.sleep(wait_secs)
+                    # Re-check connectivity before each retry
+                    reachable, reason = _check_hf_reachable()
+                    if not reachable:
+                        raise ConnectionError(f"HuggingFace unreachable: {reason}")
+
+                # Reset progress bars state for retry
+                _progress_state["file_totals"].clear()
+                _progress_state["file_done"].clear()
+                _progress_state["downloaded"] = 0
+                _progress_state["total"] = 0
+                _progress_state["files_completed"] = 0
+                _progress_state["files_total"] = 0
+
+                local_path = snapshot_download(
+                    repo_id=model_id,
+                    local_dir=target_dir,
+                    token=hf_token,
+                    ignore_patterns=[
+                        "*.gguf", "*.msgpack",
+                        "consolidated.*", "original/**",
+                        "*.pt",      # avoid raw PyTorch weights when safetensors exist
+                    ],
+                    tqdm_class=_DownloadProgressTracker,
+                )
+                last_download_exc = None
+                break  # success
+            except Exception as exc:
+                last_download_exc = exc
+                exc_str = str(exc)
+                # Never retry on auth / not-found errors
+                if any(code in exc_str for code in ("401", "403", "404", "Unauthorized", "Forbidden")):
+                    break
+                logger.warning("Download attempt %d failed for %s: %s",
+                               _attempt, model_id, exc_str[:200])
+                if _attempt == _MAX_DOWNLOAD_ATTEMPTS:
+                    # Last attempt — try HF cache fallback
+                    logger.info("All local_dir attempts failed. Trying HF cache fallback for %s", model_id)
+                    try:
+                        _progress_state["file_totals"].clear()
+                        _progress_state["file_done"].clear()
+                        _progress_state["downloaded"] = 0
+                        _progress_state["total"] = 0
+                        _update_task("download", model_id,
+                                     message=f"Trying alternative download method for {model_name}...")
+                        local_path = snapshot_download(
+                            repo_id=model_id,
+                            token=hf_token,
+                            ignore_patterns=[
+                                "*.gguf", "*.msgpack",
+                                "consolidated.*", "original/**",
+                            ],
+                            tqdm_class=_DownloadProgressTracker,
+                        )
+                        last_download_exc = None
+                    except Exception as fallback_exc:
+                        last_download_exc = fallback_exc
+                        logger.error("Fallback download also failed for %s: %s",
+                                     model_id, str(fallback_exc)[:200])
+
+        if last_download_exc is not None:
+            raise last_download_exc
 
         # Final cancel check
         if cancel_event.is_set():
@@ -621,24 +642,33 @@ def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: fl
         _update_task("download", model_id,
                      progress=92.0,
                      message=f"Verifying download integrity for {model_name}...")
-        
-        if not _is_model_cached(model_id, deep_check=True):
+
+        # Check both flat format (local_dir) and HF snapshot format
+        integrity_ok = (
+            _validate_flat_model_dir(target_dir, deep_check=True)
+            or (local_path and _validate_flat_model_dir(local_path, deep_check=True))
+            or _is_model_cached(model_id, deep_check=True, extra_paths=[target_dir, local_path] if local_path else [target_dir])
+        )
+
+        if not integrity_ok:
             error_msg = (
                 f"Download of {model_name} completed but integrity check failed. "
-                f"The download may be corrupted. Please delete the cache and retry."
+                f"The download may be incomplete. Please delete the folder and retry.\n"
+                f"Location: {target_dir}"
             )
-            logger.error("Integrity check failed for %s at %s", model_id, local_path)
+            logger.error("Integrity check failed for %s at %s", model_id, target_dir)
             _finish_task("download", model_id,
                          status="error",
                          message=error_msg,
                          error=error_msg)
             return
 
-        # ── Step 5b: Supply-chain safety — check for auto_map (remote code) ──
+        # ── Step 5b: Supply-chain safety check ────────────────────────
         supply_chain_warning = ""
-        if local_path:
+        check_path = target_dir if os.path.isfile(os.path.join(target_dir, "config.json")) else local_path
+        if check_path:
             import json as _json
-            config_path = os.path.join(local_path, "config.json")
+            config_path = os.path.join(check_path, "config.json")
             if os.path.isfile(config_path):
                 try:
                     with open(config_path) as _f:
@@ -649,10 +679,8 @@ def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: fl
                         if not TRUST_REMOTE_CODE:
                             supply_chain_warning = (
                                 f" ⚠️ This model defines custom code via auto_map "
-                                f"({', '.join(auto_map_keys)}). TRUST_REMOTE_CODE is disabled, "
-                                f"so custom code will NOT be executed. If the model doesn't work "
-                                f"correctly, you may need to enable it — but only if you trust "
-                                f"the model author."
+                                f"({', '.join(auto_map_keys)}). TRUST_REMOTE_CODE is disabled. "
+                                f"Enable only if you trust the model author."
                             )
                             logger.warning(
                                 "Model %s has auto_map entries: %s (TRUST_REMOTE_CODE=false)",
@@ -667,9 +695,9 @@ def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: fl
         _finish_task("download", model_id,
                      status="completed",
                      message=f"{model_name} downloaded successfully! ({elapsed_str}){supply_chain_warning}",
-                     metadata={"local_path": local_path, "elapsed_seconds": round(elapsed)})
+                     metadata={"local_path": target_dir, "elapsed_seconds": round(elapsed)})
 
-        logger.info("Download completed: %s -> %s (%.0fs)", model_id, local_path, elapsed)
+        logger.info("Download completed: %s → %s (%.0fs)", model_id, target_dir, elapsed)
 
     except Exception as e:
         error_msg = str(e)
@@ -700,8 +728,8 @@ def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: fl
             )
         elif "disk" in error_msg.lower() or "space" in error_msg.lower() or "No space" in error_msg:
             error_category = "disk"
-            free_gb = _get_disk_free_gb()
-            error_msg = f"Not enough disk space to download {model_name}. {free_gb:.1f} GB free."
+            free_gb = _get_disk_free_gb(target_dir)
+            error_msg = f"Not enough disk space to download {model_name}. {free_gb:.1f} GB free at '{target_dir}'."
         elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
             error_category = "timeout"
             error_msg = (
@@ -719,6 +747,12 @@ def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: fl
                 f"SSL/TLS error downloading {model_name}. "
                 f"Check system certificates or try: pip install --upgrade certifi"
             )
+        elif "Permission" in error_msg or "permission denied" in error_msg.lower():
+            error_category = "permission"
+            error_msg = (
+                f"Permission denied writing to '{target_dir}'. "
+                f"Try a different download location or fix folder permissions."
+            )
 
         logger.error("Download failed for %s [%s]: %s", model_id, error_category, error_msg)
 
@@ -726,7 +760,43 @@ def _download_model_thread(model_id: str, model_name: str, estimated_size_gb: fl
                      status="error",
                      message=error_msg,
                      error=error_msg,
-                     metadata={"error_category": error_category})
+                     metadata={"error_category": error_category, "target_dir": target_dir})
+
+
+@router.get("/download-dirs")
+def list_download_dirs(
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    """Return suggested model download locations with disk-space info.
+
+    Returns the default MODELS_DIR and the HF cache dir so the frontend
+    can offer a pick-list without hardcoding paths.
+    """
+    try:
+        get_user_from_header(db, authorization)
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+    hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
+
+    dirs = [
+        {
+            "id": "models_dir",
+            "label": "Default models folder",
+            "path": str(MODELS_DIR),
+            "disk_free_gb": _get_disk_free_gb(str(MODELS_DIR)),
+            "is_default": True,
+        },
+        {
+            "id": "hf_cache",
+            "label": "HuggingFace cache (~/.cache/huggingface)",
+            "path": hf_cache,
+            "disk_free_gb": _get_disk_free_gb(hf_cache),
+            "is_default": False,
+        },
+    ]
+    return {"dirs": dirs, "default_path": str(MODELS_DIR)}
 
 
 @router.get("/", response_model=list[ModelInfo])
@@ -1130,14 +1200,27 @@ def export_trained_model(
 
     adapters_dir = project_dir / "adapters"
     checkpoints_dir = project_dir / "checkpoints"
+    output_dir = project_dir / "output"
 
-    # Find the best source to export
+    # Find the best source to export (priority: merged output > adapters > checkpoints)
     export_dir = None
-    if adapters_dir.exists() and any(adapters_dir.iterdir()):
+    if output_dir.exists():
+        # Check for run_N subdirectories (created by CheckpointManager.merge_and_export)
+        run_dirs = sorted(
+            [d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith("run_")],
+            key=lambda d: d.name,
+            reverse=True,
+        )
+        if run_dirs and any(run_dirs[0].iterdir()):
+            export_dir = run_dirs[0]
+        elif any(output_dir.iterdir()):
+            # Direct files in output/ (legacy layout)
+            export_dir = output_dir
+    if export_dir is None and adapters_dir.exists() and any(adapters_dir.iterdir()):
         export_dir = adapters_dir
-    elif checkpoints_dir.exists() and any(checkpoints_dir.iterdir()):
+    if export_dir is None and checkpoints_dir.exists() and any(checkpoints_dir.iterdir()):
         export_dir = checkpoints_dir
-    else:
+    if export_dir is None:
         raise HTTPException(status_code=404, detail="No trained model found. Complete training first.")
 
     # Create zip archive
@@ -1412,13 +1495,18 @@ def download_model(
     model_id: str,
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db),
+    download_path: Optional[str] = Body(None, embed=True),
 ):
     """Trigger real model download from HuggingFace Hub in a background thread.
-    
+
+    Accepts optional JSON body: {"download_path": "/absolute/path/to/save"}
+    Falls back to MODELS_DIR/<org--model>/ when not specified.
+
     Hardened with:
-    - Disk space pre-check before starting download
-    - Stale task cleanup
-    - Deep cache check (verifies file integrity, not just directory existence)
+    - Optional custom download_path with validation (absolute, writable, no traversal)
+    - Disk space pre-check at the target location
+    - Stale task cleanup & graceful restart
+    - Deep cache check (flat and HF snapshot formats)
     - Estimated size forwarded to download thread for ongoing disk checks
     """
     try:
@@ -1435,25 +1523,45 @@ def download_model(
     model_name = model["name"] if model else model_id.split("/")[-1]
     estimated_size_gb = model["size_gb"] if model else 0.0
 
-    if _is_model_cached(model_id):
-        return {"detail": "Model already cached", "status": "cached"}
+    # ── Resolve & validate download_path ────────────────────────────
+    model_safe_name = model_id.replace("/", "--")
+    if download_path:
+        # Security: must be absolute and not attempt path traversal
+        resolved = os.path.realpath(os.path.abspath(download_path))
+        if ".." in download_path or "\x00" in download_path:
+            raise HTTPException(status_code=400, detail="Invalid download path.")
+        # Ensure parent directory exists (we will create the leaf dir)
+        parent = os.path.dirname(resolved)
+        if not os.path.isdir(parent) and not os.path.isdir(resolved):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Parent directory does not exist: {parent}. Please create it first."
+            )
+        effective_download_path = resolved
+    else:
+        effective_download_path = str(MODELS_DIR / model_safe_name)
 
-    # Pre-flight disk space check
+    if _is_model_cached(model_id, extra_paths=[effective_download_path]):
+        return {"detail": "Model already cached", "status": "cached",
+                "download_path": effective_download_path}
+
+    # Pre-flight disk space check at target location
     if estimated_size_gb > 0:
-        free_gb = _get_disk_free_gb()
+        free_gb = _get_disk_free_gb(effective_download_path)
         required_gb = estimated_size_gb + _DISK_HEADROOM_GB
         if free_gb < required_gb:
             raise HTTPException(
-                status_code=507,  # Insufficient Storage
-                detail=f"Not enough disk space. Need ~{required_gb:.1f} GB but only "
-                       f"{free_gb:.1f} GB free. Free up {required_gb - free_gb:.1f} GB "
-                       f"or delete unused model caches."
+                status_code=507,
+                detail=(
+                    f"Not enough disk space at '{effective_download_path}'. "
+                    f"Need ~{required_gb:.1f} GB but only {free_gb:.1f} GB free. "
+                    f"Free up {required_gb - free_gb:.1f} GB or choose a different location."
+                )
             )
 
     # Check if already downloading (in DB)
     existing = _get_task_status(db, "download", model_id)
     if existing and existing.status in ("running", "queued"):
-        # Check if the download is stale (thread crashed)
         if existing.updated_at:
             age_hours = (datetime.now(timezone.utc) - existing.updated_at).total_seconds() / 3600
             if age_hours > _DOWNLOAD_STALE_HOURS:
@@ -1464,12 +1572,12 @@ def download_model(
                 existing.error = "Stale download"
                 existing.updated_at = datetime.now(timezone.utc)
                 db.commit()
-                # Fall through to start a new download
             else:
                 return {
                     "detail": f"{model_name} is already downloading.",
                     "status": "downloading",
                     "progress": existing.progress or 0.0,
+                    "download_path": (existing.metadata_ or {}).get("download_path", effective_download_path),
                 }
 
     # Create DB task record BEFORE launching thread
@@ -1477,13 +1585,17 @@ def download_model(
         db, "download", model_id,
         initial_status="running",
         initial_message=f"Starting download of {model_name}...",
-        metadata={"model_name": model_name, "estimated_size_gb": estimated_size_gb},
+        metadata={
+            "model_name": model_name,
+            "estimated_size_gb": estimated_size_gb,
+            "download_path": effective_download_path,
+        },
     )
 
     # Launch download in background thread
     thread = threading.Thread(
         target=_download_model_thread,
-        args=(model_id, model_name, estimated_size_gb),
+        args=(model_id, model_name, estimated_size_gb, effective_download_path),
         name=f"download-{model_id.replace('/', '-')}",
         daemon=True,
     )
@@ -1493,6 +1605,7 @@ def download_model(
         "detail": f"Download started for {model_name}. Use /status endpoint to track progress.",
         "status": "downloading",
         "estimated_size_gb": estimated_size_gb or None,
+        "download_path": effective_download_path,
     }
 
 
@@ -1502,7 +1615,16 @@ def download_progress(
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
-    """Get the progress of an ongoing model download."""
+    """Get the progress of an ongoing model download.
+
+    Ordering guarantee:
+    1. Check DB task FIRST — if a download is running/queued, trust the DB state
+       regardless of what the filesystem reports. This prevents premature "cached"
+       responses when the model already exists in the HF cache while snapshot_download
+       is still writing to a different target directory.
+    2. Only after confirming no active task, check the filesystem for cached status.
+    3. Fall back to completed/errored task state or "not_started".
+    """
     try:
         get_user_from_header(db, authorization)
     except ValueError as e:
@@ -1511,6 +1633,29 @@ def download_progress(
     model = next((m for m in MODEL_CATALOG if m["model_id"] == model_id), None)
     model_name = model["name"] if model else model_id.split("/")[-1]
 
+    # ── Step 1: Check DB task FIRST ──────────────────────────────────
+    # If a download thread is actively running, return its live state immediately.
+    # We must NOT check _is_model_cached() here because the model may already exist
+    # in the HF cache (~/.cache/huggingface/hub) while the download thread is still
+    # writing to a different location (the local models/ directory).
+    task = _get_task_status(db, "download", model_id)
+    if task and task.status in ("running", "queued"):
+        result = {
+            "status": "downloading",
+            "progress": task.progress or 0.0,
+            "message": task.message or "",
+            "is_cached": False,
+            "error": None,
+            "started_at": task.created_at.timestamp() if task.created_at else None,
+            "completed_at": None,
+            "local_path": None,
+        }
+        if task.created_at:
+            elapsed = time.time() - task.created_at.timestamp()
+            result["elapsed_seconds"] = round(elapsed)
+        return result
+
+    # ── Step 2: No active task — safe to check filesystem ────────────
     if _is_model_cached(model_id):
         return {
             "status": "cached",
@@ -1519,11 +1664,10 @@ def download_progress(
             "is_cached": True,
         }
 
-    # Check DB for task
-    task = _get_task_status(db, "download", model_id)
+    # ── Step 3: Return terminal task state (completed / error / etc.) ─
     if task:
         result = {
-            "status": task.status if task.status != "running" else "downloading",
+            "status": task.status,
             "progress": task.progress or 0.0,
             "message": task.message or "",
             "is_cached": False,
@@ -1537,6 +1681,7 @@ def download_progress(
             result["elapsed_seconds"] = round(elapsed)
         return result
 
+    # ── Step 4: No task, not cached ───────────────────────────────────
     return {
         "status": "not_started",
         "progress": 0.0,
@@ -1612,6 +1757,7 @@ def delete_cached_model(
         raise HTTPException(status_code=409, detail="Cannot delete while download is in progress")
 
     model_dir_name = "models--" + model_id.replace("/", "--")
+    model_safe_name = model_id.replace("/", "--")
     deleted = False
     freed_bytes = 0
 
@@ -1629,6 +1775,29 @@ def delete_cached_model(
         freed_bytes += sum(f.stat().st_size for f in app_model_dir.rglob("*") if f.is_file())
         shutil.rmtree(app_model_dir, ignore_errors=True)
         deleted = True
+
+    # Remove from MODELS_DIR (flat local_dir format — the default download location)
+    flat_dir = MODELS_DIR / model_safe_name
+    if flat_dir.is_dir():
+        freed_bytes += sum(f.stat().st_size for f in flat_dir.rglob("*") if f.is_file())
+        shutil.rmtree(flat_dir, ignore_errors=True)
+        deleted = True
+
+    # Also scan MODELS_DIR for variant names (same logic as is_model_cached)
+    if MODELS_DIR.is_dir():
+        mid_variants = {
+            model_id.lower(),
+            model_id.lower().replace("/", "--"),
+            model_id.lower().replace("/", "_"),
+            model_id.split("/")[-1].lower(),
+        }
+        for candidate in MODELS_DIR.iterdir():
+            if not candidate.is_dir():
+                continue
+            if candidate.name.lower() in mid_variants and candidate != flat_dir:
+                freed_bytes += sum(f.stat().st_size for f in candidate.rglob("*") if f.is_file())
+                shutil.rmtree(candidate, ignore_errors=True)
+                deleted = True
 
     if not deleted:
         raise HTTPException(status_code=404, detail="Model cache directory not found on disk")

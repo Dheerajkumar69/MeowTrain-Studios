@@ -273,9 +273,24 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        response.headers["Cache-Control"] = "no-store"
-        # CSP is light — API-only backend, no inline scripts
-        response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+
+        # Cache-Control: no-store for API responses, allow caching for static assets
+        path = request.url.path
+        if path.startswith("/assets/") or path.endswith((".js", ".css", ".png", ".jpg", ".svg", ".woff2")):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-store"
+
+        # CSP — allow self-hosted scripts/styles + Google Fonts for the frontend
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; "
+            "img-src 'self' data: blob:; "
+            "connect-src 'self' ws: wss:; "
+            "frame-ancestors 'none'"
+        )
         # HSTS — only when explicitly enabled for production
         if ENFORCE_HTTPS:
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
@@ -303,9 +318,17 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
             # No browser indicators — likely API client, allow through
             return await call_next(request)
 
-        # Validate origin matches allowed CORS origins
+        # Build set of allowed origins: CORS origins + the server's own origin
+        # (same-origin is always safe — this covers bare-metal/HPC deployments
+        #  where the backend serves the frontend directly)
         allowed = set(CORS_ORIGINS) if CORS_ORIGINS != ["*"] else None
-        if allowed:
+        if allowed is not None:
+            # Also allow the request's own host (same-origin)
+            scheme = "https" if request.url.scheme == "https" else "http"
+            host_header = request.headers.get("host", "")
+            if host_header:
+                allowed.add(f"{scheme}://{host_header}")
+
             check_origin = origin or (referer.split("/", 3)[:3] if referer else [""])
             if isinstance(check_origin, list):
                 check_origin = "/".join(check_origin)
@@ -388,4 +411,41 @@ def health_check():
         "db_connected": db_connected,
         "db_latency_ms": db_latency_ms,
     }
+
+
+# ── Static file serving for bare-metal / HPC deployment ──
+# When running WITHOUT Docker/nginx (e.g. on a college HPC),
+# the backend serves the pre-built frontend from ../frontend/dist.
+# This is a no-op if the dist directory doesn't exist (dev mode uses Vite proxy).
+import os as _os
+from pathlib import Path as _Path
+
+_FRONTEND_DIST = _Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+
+if _FRONTEND_DIST.is_dir():
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.responses import FileResponse as _FileResponse
+
+    _index_html = _FRONTEND_DIST / "index.html"
+
+    # Serve static assets (JS, CSS, images) at /assets
+    _assets_dir = _FRONTEND_DIST / "assets"
+    if _assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="frontend-assets")
+
+    # SPA catch-all: any non-API GET request returns index.html
+    # so React Router can handle client-side routing
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def _serve_spa(full_path: str):
+        # Don't intercept /api routes — let them 404 normally
+        if full_path.startswith("api/") or full_path == "api":
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        # Serve real static files from frontend/dist
+        file_path = _FRONTEND_DIST / full_path
+        if full_path and file_path.is_file() and _FRONTEND_DIST in file_path.resolve().parents:
+            return _FileResponse(str(file_path))
+        return _FileResponse(str(_index_html))
+
+    logger.info("Serving frontend from %s (bare-metal mode)", _FRONTEND_DIST)
 

@@ -82,6 +82,28 @@ def _detect_live() -> dict:
     except Exception as e:
         logger.error("Unexpected error during live detection: %s", e)
 
+    # If no CUDA found, check if an NVIDIA GPU is present but blocked by PRIME
+    if not config["cuda_available"]:
+        try:
+            import subprocess
+            lspci = subprocess.check_output(["lspci"], text=True, timeout=3)
+            if "nvidia" in lspci.lower():
+                prime = subprocess.check_output(
+                    ["prime-select", "query"], text=True, timeout=3
+                ).strip()
+                if prime == "intel":
+                    config["_prime_blocked"] = True
+                    logger.warning(
+                        "⚠️  NVIDIA GPU detected but PRIME is set to 'intel' — "
+                        "the dGPU is powered off!  Run: sudo prime-select on-demand  "
+                        "then REBOOT to enable GPU training."
+                    )
+                elif prime == "on-demand":
+                    config["_prime_mode"] = "on-demand"
+                    logger.info("PRIME on-demand active — CUDA should be available after reboot")
+        except Exception:
+            pass
+
     return config
 
 

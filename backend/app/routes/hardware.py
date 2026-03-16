@@ -55,6 +55,9 @@ def device_info(
         "torch_version": config.get("torch_version")
             or config.get("validation", {}).get("torch_version"),
         "recommended_defaults": defaults,
+        # PRIME / Optimus hints (Linux laptops with hybrid graphics)
+        "prime_blocked": config.get("_prime_blocked", False),
+        "prime_mode": config.get("_prime_mode"),
     }
 
 

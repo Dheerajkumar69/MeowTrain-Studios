@@ -5,7 +5,7 @@ const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
     const [user, setUser] = useState(null);
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(() => !!localStorage.getItem('meowllm_token'));
 
     useEffect(() => {
         const token = localStorage.getItem('meowllm_token');
@@ -20,8 +20,6 @@ export function AuthProvider({ children }) {
                     }
                 })
                 .finally(() => setLoading(false));
-        } else {
-            setLoading(false);
         }
     }, []);
 

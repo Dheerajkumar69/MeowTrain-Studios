@@ -100,7 +100,7 @@ describe('ConfirmDialog', () => {
 
         // Get all buttons in the dialog
         const closeBtn = screen.getByLabelText('Close dialog');
-        const cancelBtn = screen.getByText('Cancel');
+        screen.getByText('Cancel');  // Assert it exists
         const confirmBtn = screen.getByText('Delete');
 
         // Focus the last focusable element (confirm button)

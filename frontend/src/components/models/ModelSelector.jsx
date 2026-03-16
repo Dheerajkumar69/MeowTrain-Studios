@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { modelsAPI } from '../../services/api';
-import { Check, Download, AlertTriangle, XCircle, Loader, Info, Search, ExternalLink, X, Trash2, HardDrive, Wifi, WifiOff, HardDriveDownload, RefreshCw, Shield, ChevronDown } from 'lucide-react';
+import { Check, Download, AlertTriangle, XCircle, Loader, Info, Search, ExternalLink, X, Trash2, HardDrive, Wifi, WifiOff, HardDriveDownload, RefreshCw, Shield, ChevronDown, FolderOpen, MapPin } from 'lucide-react';
 
 const COMPAT_CONFIG = {
     compatible: { label: 'Perfect fit', color: 'text-success-600 bg-success-400/10', icon: Check },
@@ -55,12 +55,134 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
 
     // Preflight / readiness state
     const [preflight, setPreflight] = useState(null);
-    const [preflightLoading, setPreflightLoading] = useState(false);
 
-    // Load models with retry
+    // ── Delete confirmation dialog ─────────────────────────────
+    // deleteConfirm: null | { modelId, modelName }
+    const [deleteConfirm, setDeleteConfirm] = useState(null);
+
+    // ── Download location picker dialog ─────────────────────────
+    // downloadDialog: null | { modelId, modelName, sizeGb }
+    const [downloadDialog, setDownloadDialog] = useState(null);
+    // Available directories (from /models/download-dirs)
+    const [downloadDirs, setDownloadDirs] = useState([]);
+    // Which dir option is selected: 'default' | 'hf_cache' | 'custom'
+    const [dlDirMode, setDlDirMode] = useState('default');
+    const [customDlPath, setCustomDlPath] = useState('');
+
+
+
+    // Run preflight check on mount (non-blocking)
+    useEffect(() => {
+        modelsAPI.preflight()
+            .then(res => setPreflight(res.data))
+            .catch(() => { }); // Silent — not critical
+    }, []);
+
+    // Load suggested download directories
+    useEffect(() => {
+        modelsAPI.downloadDirs()
+            .then(res => {
+                const dirs = res.data?.dirs || [];
+                setDownloadDirs(dirs);
+            })
+            .catch(() => { }); // Silent — non-critical
+    }, []);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => {
+            Object.values(pollRefs.current).forEach(clearInterval);
+        };
+    }, []);
+
+    // ── Resume any in-flight downloads on mount ─────────────────
+    // ModelSelector is conditionally rendered (tab-based), so it can remount
+    // mid-download. On each mount we probe every known model and any active
+    // custom model to see if a download is already running on the backend.
+    const pollDownloadProgressRef = useRef(null);
+    useEffect(() => {
+        // pollDownloadProgress is defined later; we use a ref so this effect
+        // can call it without a stale-closure dependency.
+        pollDownloadProgressRef.current = (modelId) => {
+            if (pollRefs.current[modelId]) clearInterval(pollRefs.current[modelId]);
+            let consecutiveErrors = 0;
+            const MAX_POLL_ERRORS = 10;
+            const poll = async () => {
+                try {
+                    const res = await modelsAPI.downloadProgress(modelId);
+                    const data = res.data;
+                    consecutiveErrors = 0;
+                    setDownloads((prev) => ({
+                        ...prev,
+                        [modelId]: {
+                            status: data.status,
+                            progress: data.progress || 0,
+                            message: data.message || '',
+                            error: data.error,
+                            elapsed_seconds: data.elapsed_seconds,
+                        },
+                    }));
+                    // 'cached' is only terminal when progress == 100. This guards against
+                    // the race where model exists in HF cache but download is still running.
+                    const isTerminalCached = data.status === 'cached' && (data.progress || 0) >= 100;
+                    if (data.status === 'completed' || isTerminalCached) {
+                        clearInterval(pollRefs.current[modelId]);
+                        delete pollRefs.current[modelId];
+                        loadModels();
+                        setTimeout(() => setDownloads((prev) => { const n = { ...prev }; delete n[modelId]; return n; }), 5000);
+                    } else if (data.status === 'error' || data.status === 'cancelled' || data.status === 'interrupted') {
+                        clearInterval(pollRefs.current[modelId]);
+                        delete pollRefs.current[modelId];
+                    }
+                    // 'downloading', 'running', 'queued', 'cached' (progress<100) → keep polling
+                } catch {
+                    consecutiveErrors++;
+                    if (consecutiveErrors >= MAX_POLL_ERRORS) {
+                        clearInterval(pollRefs.current[modelId]);
+                        delete pollRefs.current[modelId];
+                    }
+                }
+            };
+            poll();
+            pollRefs.current[modelId] = setInterval(poll, 2000);
+        };
+    });
+
+    // Load models with retry; after loading, probe for any in-flight downloads
+    // so that the progress bar reappears after a tab switch (component remount).
     const loadModels = useCallback(() => {
         withRetry(() => modelsAPI.list(), { retries: 2, delay: 1500 })
-            .then((res) => { setModels(res.data || []); setError(''); })
+            .then((res) => {
+                const loaded = res.data || [];
+                setModels(loaded);
+                setError('');
+                // Resume polling for any model that is currently downloading
+                loaded.forEach((m) => {
+                    if (!pollRefs.current[m.model_id]) {
+                        modelsAPI.downloadProgress(m.model_id)
+                            .then((pr) => {
+                                const d = pr.data;
+                                if (d.status === 'running' || d.status === 'queued' || d.status === 'downloading') {
+                                    setDownloads((prev) => ({
+                                        ...prev,
+                                        [m.model_id]: {
+                                            status: d.status,
+                                            progress: d.progress || 0,
+                                            message: d.message || '',
+                                            error: d.error,
+                                            elapsed_seconds: d.elapsed_seconds,
+                                        },
+                                    }));
+                                    // Start live polling
+                                    if (pollDownloadProgressRef.current) {
+                                        pollDownloadProgressRef.current(m.model_id);
+                                    }
+                                }
+                            })
+                            .catch(() => { }); // silent — model has no download task
+                    }
+                });
+            })
             .catch((err) => {
                 const status = err.response?.status;
                 if (!err.response) {
@@ -75,41 +197,24 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
             .finally(() => setLoading(false));
     }, []);
 
+    // Trigger load on mount
     useEffect(() => {
         loadModels();
     }, [loadModels]);
 
-    // Run preflight check on mount (non-blocking)
-    useEffect(() => {
-        modelsAPI.preflight()
-            .then(res => setPreflight(res.data))
-            .catch(() => { }); // Silent — not critical
-    }, []);
-
-    // Cleanup polling on unmount
-    useEffect(() => {
-        return () => {
-            Object.values(pollRefs.current).forEach(clearInterval);
-        };
-    }, []);
-
-    // ── Preflight check before download ─────────────────────────
     const runPreflightForModel = useCallback(async (modelId) => {
         try {
-            setPreflightLoading(true);
             const res = await modelsAPI.preflight(modelId);
             setPreflight(res.data);
             return res.data;
         } catch (err) {
             console.debug('Preflight check failed:', err.message || err);
             return null;
-        } finally {
-            setPreflightLoading(false);
         }
     }, []);
 
     // ── Download management ─────────────────────────────────────
-    const startDownload = useCallback(async (modelId) => {
+    const startDownload = useCallback(async (modelId, downloadPath = null) => {
         setError('');
 
         // Pre-flight check
@@ -133,7 +238,7 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
             [modelId]: { status: 'starting', progress: 0, message: 'Starting download...' },
         }));
         try {
-            const res = await modelsAPI.download(modelId);
+            const res = await modelsAPI.download(modelId, downloadPath);
             if (res.data?.status === 'cached') {
                 setDownloads((prev) => {
                     const next = { ...prev };
@@ -159,6 +264,33 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
         }
     }, [loadModels, runPreflightForModel]);
 
+    // Open the "choose save location" dialog before starting a download
+    const openDownloadDialog = useCallback((model) => {
+        // Reset dialog state
+        setDlDirMode('default');
+        setCustomDlPath('');
+        setDownloadDialog({
+            modelId: model.model_id,
+            modelName: model.name,
+            sizeGb: model.size_gb,
+        });
+    }, []);
+
+    // Called when user confirms the dialog
+    const confirmDownloadDialog = useCallback(() => {
+        if (!downloadDialog) return;
+        let chosenPath = null;
+        if (dlDirMode === 'custom') {
+            chosenPath = customDlPath.trim() || null;
+        } else if (dlDirMode === 'hf_cache') {
+            const hfDir = downloadDirs.find(d => d.id === 'hf_cache');
+            chosenPath = hfDir?.path || null;
+        }
+        // null → server uses default MODELS_DIR
+        setDownloadDialog(null);
+        startDownload(downloadDialog.modelId, chosenPath);
+    }, [downloadDialog, dlDirMode, customDlPath, downloadDirs, startDownload]);
+
     const pollDownloadProgress = useCallback((modelId) => {
         if (pollRefs.current[modelId]) clearInterval(pollRefs.current[modelId]);
 
@@ -182,7 +314,10 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                     },
                 }));
 
-                if (data.status === 'completed' || data.status === 'cached') {
+                // 'cached' is only terminal when progress == 100. This prevents stopping
+                // polling prematurely if the model is in HF cache but still downloading.
+                const isTerminalCached = data.status === 'cached' && (data.progress || 0) >= 100;
+                if (data.status === 'completed' || isTerminalCached) {
                     clearInterval(pollRefs.current[modelId]);
                     delete pollRefs.current[modelId];
                     loadModels();
@@ -197,6 +332,7 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                     clearInterval(pollRefs.current[modelId]);
                     delete pollRefs.current[modelId];
                 }
+                // 'downloading', 'running', 'queued', 'starting' → keep polling
             } catch (pollErr) {
                 console.debug('Download poll error:', pollErr.message || pollErr);
                 consecutiveErrors++;
@@ -243,8 +379,14 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
         }
     }, []);
 
-    const deleteCache = useCallback(async (modelId) => {
-        if (!window.confirm('Delete this cached model? It will need to be re-downloaded to use.')) return;
+    const deleteCache = useCallback((modelId, modelName = '') => {
+        setDeleteConfirm({ modelId, modelName });
+    }, []);
+
+    const confirmDelete = useCallback(async () => {
+        if (!deleteConfirm) return;
+        const { modelId } = deleteConfirm;
+        setDeleteConfirm(null);
         try {
             await modelsAPI.deleteCache(modelId);
             setError('');
@@ -255,7 +397,7 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
         } catch (err) {
             setError(err.response?.data?.detail || 'Failed to delete cached model');
         }
-    }, [loadModels, selectedModel, onSelectModel]);
+    }, [deleteConfirm, loadModels, selectedModel, onSelectModel]);
 
     const dismissDownload = useCallback((modelId) => {
         setDownloads((prev) => {
@@ -270,6 +412,21 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
         const m = Math.floor(secs / 60);
         const s = secs % 60;
         return m > 0 ? `${m}m ${s}s` : `${s}s`;
+    };
+
+    // Parse speed, ETA, and bytes from the backend progress message string.
+    // Message format: "Downloading Name: 240/1024 MB (23%) • 5.2 MB/s • ETA 2m"
+    const parseDownloadMessage = (message = '') => {
+        const result = { speed: null, eta: null, doneMb: null, totalMb: null, pct: null };
+        const bytesMatch = message.match(/(\d+)\/(\d+)\s*MB/);
+        if (bytesMatch) { result.doneMb = parseInt(bytesMatch[1]); result.totalMb = parseInt(bytesMatch[2]); }
+        const pctMatch = message.match(/\((\d+)%\)/);
+        if (pctMatch) result.pct = parseInt(pctMatch[1]);
+        const speedMatch = message.match(/([\d.]+)\s*MB\/s/);
+        if (speedMatch) result.speed = parseFloat(speedMatch[1]);
+        const etaMatch = message.match(/ETA\s+([\d]+m(?:\s*[\d]+s)?|[\d]+s)/);
+        if (etaMatch) result.eta = etaMatch[1];
+        return result;
     };
 
     // ── Custom model lookup (exact ID) ──────────────────────────
@@ -597,32 +754,60 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                         {(() => {
                             const dl = downloads[customModel.model_id];
                             if (!dl) return null;
-                            const isDownloading = dl.status === 'downloading' || dl.status === 'starting' || dl.status === 'running';
+                            const isDownloading = dl.status === 'downloading' || dl.status === 'starting' || dl.status === 'running' || dl.status === 'queued';
                             const downloadDone = dl.status === 'completed' || dl.status === 'cached';
                             const downloadErr = dl.status === 'error';
+                            const { speed, eta, doneMb, totalMb, pct } = parseDownloadMessage(dl.message);
+                            const displayPct = pct ?? dl.progress ?? 0;
                             return (
-                                <div className="mt-2 bg-surface-50 rounded-lg p-2.5 border border-surface-100" onClick={(e) => e.stopPropagation()}>
+                                <div className="mt-2 rounded-xl border border-surface-200 bg-surface-50 overflow-hidden" onClick={(e) => e.stopPropagation()}>
                                     {isDownloading && (
                                         <>
-                                            <div className="flex items-center justify-between mb-1">
-                                                <span className="text-xs font-medium text-primary-700 flex items-center gap-1">
-                                                    <Loader className="w-3 h-3 animate-spin" /> Downloading...
-                                                </span>
-                                                <button onClick={() => cancelDownload(customModel.model_id)} className="text-surface-400 hover:text-danger-500 transition-colors">
-                                                    <X className="w-3.5 h-3.5" />
-                                                </button>
+                                            {/* Progress bar */}
+                                            <div className="relative h-2 bg-surface-200">
+                                                <div
+                                                    className="absolute inset-y-0 left-0 bg-gradient-to-r from-primary-400 via-primary-500 to-emerald-500 transition-all duration-700 ease-out"
+                                                    style={{ width: `${Math.max(displayPct, 2)}%` }}
+                                                >
+                                                    <div className="absolute inset-0 bg-white/20 animate-pulse" />
+                                                </div>
                                             </div>
-                                            <div className="w-full h-1.5 bg-surface-200 rounded-full overflow-hidden">
-                                                <div className="h-full bg-primary-500 rounded-full transition-all duration-500" style={{ width: `${Math.max(dl.progress || 0, 2)}%` }} />
+                                            {/* Stats row */}
+                                            <div className="px-3 py-2 space-y-1.5">
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-xs font-semibold text-primary-700 flex items-center gap-1.5">
+                                                        <Loader className="w-3 h-3 animate-spin" />
+                                                        {displayPct > 0 ? `${Math.round(displayPct)}%` : 'Starting...'}
+                                                    </span>
+                                                    <button onClick={() => cancelDownload(customModel.model_id)} className="text-surface-400 hover:text-danger-500 transition-colors" title="Cancel download">
+                                                        <X className="w-3.5 h-3.5" />
+                                                    </button>
+                                                </div>
+                                                <div className="flex items-center gap-3 flex-wrap">
+                                                    {doneMb != null && totalMb != null && (
+                                                        <span className="text-[10px] text-surface-500 font-mono">{doneMb} / {totalMb} MB</span>
+                                                    )}
+                                                    {speed != null && (
+                                                        <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full">{speed.toFixed(1)} MB/s</span>
+                                                    )}
+                                                    {eta && (
+                                                        <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full">ETA {eta}</span>
+                                                    )}
+                                                </div>
                                             </div>
-                                            <p className="text-xs text-surface-500 mt-1 truncate">{dl.message}</p>
                                         </>
                                     )}
                                     {downloadDone && (
-                                        <span className="text-xs text-success-600 flex items-center gap-1"><Check className="w-3 h-3" /> Download complete!</span>
+                                        <div className="px-3 py-2 flex items-center gap-1.5 text-success-600">
+                                            <Check className="w-3.5 h-3.5" />
+                                            <span className="text-xs font-medium">Download complete!</span>
+                                        </div>
                                     )}
                                     {downloadErr && (
-                                        <span className="text-xs text-danger-600 flex items-center gap-1"><XCircle className="w-3 h-3" /> {dl.message}</span>
+                                        <div className="px-3 py-2 flex items-start gap-1.5 text-danger-600">
+                                            <XCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                                            <span className="text-xs">{dl.message || 'Download failed'}</span>
+                                        </div>
                                     )}
                                 </div>
                             );
@@ -632,7 +817,7 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                         <div className="flex gap-2 mt-3" onClick={(e) => e.stopPropagation()}>
                             {!customModel.is_cached && !downloads[customModel.model_id]?.status?.match(/downloading|starting|running/) && (
                                 <button
-                                    onClick={() => startDownload(customModel.model_id)}
+                                    onClick={() => openDownloadDialog(customModel)}
                                     className="flex-1 py-1.5 rounded-lg text-xs font-medium bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 flex items-center justify-center gap-1"
                                 >
                                     <Download className="w-3 h-3" /> Download ({customModel.size_gb} GB)
@@ -675,8 +860,8 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                     const CompatIcon = compat.icon;
                     const isSelected = selectedModel?.model_id === model.model_id;
                     const dl = downloads[model.model_id];
-                    const isDownloading = dl && (dl.status === 'downloading' || dl.status === 'starting' || dl.status === 'running');
-                    const downloadDone = dl && (dl.status === 'completed' || dl.status === 'cached');
+                    const isDownloading = dl && (dl.status === 'downloading' || dl.status === 'starting' || dl.status === 'running' || dl.status === 'queued');
+                    const downloadDone = dl && (dl.status === 'completed' || (dl.status === 'cached' && (dl.progress || 0) >= 100));
                     const downloadError = dl && (dl.status === 'error');
                     const downloadCancelled = dl && (dl.status === 'cancelled');
 
@@ -745,7 +930,7 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                                             <Check className="w-3 h-3" /> Cached
                                         </span>
                                         <button
-                                            onClick={(e) => { e.stopPropagation(); deleteCache(model.model_id); }}
+                                            onClick={(e) => { e.stopPropagation(); deleteCache(model.model_id, model.name); }}
                                             className="text-surface-400 hover:text-danger-500 transition-colors p-0.5 rounded"
                                             title="Delete cached model"
                                             aria-label={`Delete cached ${model.name}`}
@@ -762,49 +947,92 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
 
                             {/* Download Progress Bar */}
                             {dl && (
-                                <div className="mt-3 bg-surface-50 rounded-xl p-3 border border-surface-100" onClick={(e) => e.stopPropagation()}>
-                                    {isDownloading && (
-                                        <>
-                                            <div className="flex items-center justify-between mb-1.5">
-                                                <span className="text-xs font-medium text-primary-700 flex items-center gap-1.5">
-                                                    <Loader className="w-3 h-3 animate-spin" />
-                                                    Downloading...
-                                                </span>
-                                                <div className="flex items-center gap-2">
-                                                    {dl.elapsed_seconds > 0 && (
-                                                        <span className="text-xs text-surface-400">{formatElapsed(dl.elapsed_seconds)}</span>
-                                                    )}
-                                                    <button
-                                                        onClick={() => cancelDownload(model.model_id)}
-                                                        className="text-surface-400 hover:text-danger-500 transition-colors"
-                                                        title="Cancel download"
+                                <div className="mt-3 rounded-xl border border-surface-200 bg-surface-50 overflow-hidden" onClick={(e) => e.stopPropagation()}>
+                                    {isDownloading && (() => {
+                                        const { speed, eta, doneMb, totalMb, pct } = parseDownloadMessage(dl.message);
+                                        const displayPct = pct ?? dl.progress ?? 0;
+                                        return (
+                                            <>
+                                                {/* Animated gradient progress bar */}
+                                                <div className="relative h-3 bg-surface-200">
+                                                    <div
+                                                        className="absolute inset-y-0 left-0 bg-gradient-to-r from-primary-400 via-primary-500 to-emerald-500 transition-all duration-700 ease-out"
+                                                        style={{ width: `${Math.max(displayPct, 2)}%` }}
                                                     >
-                                                        <X className="w-3.5 h-3.5" />
-                                                    </button>
+                                                        {/* Shimmer overlay */}
+                                                        <div className="absolute inset-0 overflow-hidden">
+                                                            <div className="absolute inset-y-0 -left-full w-1/2 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-slide-shimmer" />
+                                                        </div>
+                                                    </div>
+                                                    {/* Percentage label on bar */}
+                                                    {displayPct >= 8 && (
+                                                        <span className="absolute inset-y-0 left-2 flex items-center text-[9px] font-bold text-white drop-shadow">
+                                                            {Math.round(displayPct)}%
+                                                        </span>
+                                                    )}
                                                 </div>
-                                            </div>
-                                            <div className="w-full h-2 bg-surface-200 rounded-full overflow-hidden">
-                                                <div
-                                                    className="h-full bg-gradient-to-r from-primary-400 to-primary-600 rounded-full transition-all duration-500 ease-out"
-                                                    style={{ width: `${Math.max(dl.progress || 0, 2)}%` }}
-                                                />
-                                            </div>
-                                            <p className="text-xs text-surface-500 mt-1.5 truncate">{dl.message}</p>
-                                        </>
-                                    )}
+
+                                                {/* Stats row */}
+                                                <div className="px-3 py-2.5">
+                                                    <div className="flex items-center justify-between mb-2">
+                                                        <span className="text-xs font-semibold text-primary-700 flex items-center gap-1.5">
+                                                            <Loader className="w-3.5 h-3.5 animate-spin" />
+                                                            {displayPct > 0 ? `Downloading — ${Math.round(displayPct)}%` : 'Starting download…'}
+                                                        </span>
+                                                        <div className="flex items-center gap-2">
+                                                            {dl.elapsed_seconds > 0 && (
+                                                                <span className="text-[10px] text-surface-400">{formatElapsed(dl.elapsed_seconds)}</span>
+                                                            )}
+                                                            <button
+                                                                onClick={() => cancelDownload(model.model_id)}
+                                                                className="text-surface-400 hover:text-danger-500 transition-colors"
+                                                                title="Cancel download"
+                                                            >
+                                                                <X className="w-3.5 h-3.5" />
+                                                            </button>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Metric pills */}
+                                                    <div className="flex items-center gap-2 flex-wrap">
+                                                        {doneMb != null && totalMb != null && (
+                                                            <span className="inline-flex items-center gap-1 text-[10px] text-surface-600 bg-white border border-surface-200 px-2 py-1 rounded-full font-mono">
+                                                                <HardDrive className="w-3 h-3 text-surface-400" />
+                                                                {doneMb} / {totalMb} MB
+                                                            </span>
+                                                        )}
+                                                        {speed != null && (
+                                                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-full">
+                                                                <Wifi className="w-3 h-3" />
+                                                                {speed.toFixed(1)} MB/s
+                                                            </span>
+                                                        )}
+                                                        {eta && (
+                                                            <span className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded-full">
+                                                                ⏱ ETA {eta}
+                                                            </span>
+                                                        )}
+                                                        {!speed && !eta && dl.message && (
+                                                            <span className="text-[10px] text-surface-500">{dl.message}</span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </>
+                                        );
+                                    })()}
                                     {downloadDone && (
-                                        <div className="flex items-center gap-2 text-success-600">
+                                        <div className="px-3 py-2.5 flex items-center gap-2 text-success-600 bg-success-400/5">
                                             <Check className="w-4 h-4" />
                                             <span className="text-xs font-medium">Download complete!</span>
                                         </div>
                                     )}
                                     {downloadError && (
-                                        <div className="flex items-center justify-between">
-                                            <span className="text-xs text-danger-600 flex items-center gap-1.5">
-                                                <XCircle className="w-3.5 h-3.5" />
-                                                {dl.message || 'Download failed'}
-                                            </span>
-                                            <div className="flex items-center gap-1.5">
+                                        <div className="px-3 py-2.5">
+                                            <div className="flex items-start gap-1.5 text-danger-600 mb-1.5">
+                                                <XCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                                                <span className="text-xs leading-snug">{dl.message || 'Download failed'}</span>
+                                            </div>
+                                            <div className="flex items-center gap-2">
                                                 <button
                                                     onClick={() => { dismissDownload(model.model_id); startDownload(model.model_id); }}
                                                     className="text-xs text-primary-600 hover:text-primary-800 font-medium transition-colors"
@@ -813,15 +1041,15 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                                                 </button>
                                                 <button
                                                     onClick={() => dismissDownload(model.model_id)}
-                                                    className="text-surface-400 hover:text-surface-600 transition-colors"
+                                                    className="text-[10px] text-surface-400 hover:text-surface-600 transition-colors"
                                                 >
-                                                    <X className="w-3.5 h-3.5" />
+                                                    Dismiss
                                                 </button>
                                             </div>
                                         </div>
                                     )}
                                     {downloadCancelled && (
-                                        <div className="flex items-center gap-2 text-surface-500">
+                                        <div className="px-3 py-2.5 flex items-center gap-2 text-surface-500">
                                             <Info className="w-3.5 h-3.5" />
                                             <span className="text-xs">Download cancelled</span>
                                         </div>
@@ -833,7 +1061,7 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                             <div className="flex gap-2 mt-4">
                                 {!model.is_cached && !isDownloading && (
                                     <button
-                                        onClick={(e) => { e.stopPropagation(); startDownload(model.model_id); }}
+                                        onClick={(e) => { e.stopPropagation(); openDownloadDialog(model); }}
                                         disabled={isDownloading}
                                         className="flex-1 py-2 rounded-xl text-sm font-medium transition-all bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 flex items-center justify-center gap-1.5"
                                     >
@@ -879,7 +1107,7 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                             </span>
                         ) : (
                             <button
-                                onClick={() => startDownload(selectedModel.model_id)}
+                                onClick={() => openDownloadDialog(selectedModel)}
                                 disabled={downloads[selectedModel.model_id]?.status?.match(/downloading|starting|running/)}
                                 className="inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full bg-emerald-500 text-white hover:bg-emerald-600 transition-colors disabled:opacity-50"
                             >
@@ -890,6 +1118,166 @@ export default function ModelSelector({ selectedModel, onSelectModel }) {
                                 )}
                             </button>
                         )}
+                    </div>
+                </div>
+            )}
+
+            {/* ── Delete Confirmation Dialog ─────────────────────────── */}
+            {deleteConfirm && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+                    onClick={() => setDeleteConfirm(null)}>
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 space-y-4"
+                        onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-start gap-3">
+                            <div className="p-2 rounded-full bg-danger-100 shrink-0">
+                                <Trash2 className="w-5 h-5 text-danger-600" />
+                            </div>
+                            <div>
+                                <h3 className="text-base font-bold text-surface-900">Delete cached model?</h3>
+                                {deleteConfirm.modelName && (
+                                    <p className="text-sm text-surface-600 mt-0.5">
+                                        <span className="font-semibold">{deleteConfirm.modelName}</span> will be removed from disk.
+                                    </p>
+                                )}
+                                <p className="text-xs text-surface-400 mt-1">You can re-download it later.</p>
+                            </div>
+                        </div>
+                        <div className="flex gap-3">
+                            <button
+                                onClick={() => setDeleteConfirm(null)}
+                                className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-surface-100 text-surface-700 hover:bg-surface-200 transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={confirmDelete}
+                                className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-red-500 text-white hover:bg-red-600 transition-colors flex items-center justify-center gap-2"
+                            >
+                                <Trash2 className="w-4 h-4" /> Delete
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Download Location Dialog ─────────────────────────────── */}
+            {downloadDialog && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+                    onClick={() => setDownloadDialog(null)}>
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-5"
+                        onClick={(e) => e.stopPropagation()}>
+                        {/* Header */}
+                        <div className="flex items-start justify-between">
+                            <div>
+                                <h3 className="text-base font-bold text-surface-900 flex items-center gap-2">
+                                    <FolderOpen className="w-5 h-5 text-primary-500" />
+                                    Choose save location
+                                </h3>
+                                <p className="text-xs text-surface-500 mt-0.5">
+                                    Downloading <span className="font-semibold">{downloadDialog.modelName}</span>
+                                    {downloadDialog.sizeGb > 0 && <span className="text-surface-400"> ({downloadDialog.sizeGb} GB)</span>}
+                                </p>
+                            </div>
+                            <button onClick={() => setDownloadDialog(null)}
+                                className="text-surface-400 hover:text-surface-600 transition-colors mt-0.5">
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
+
+                        {/* Location options */}
+                        <div className="space-y-2">
+                            {/* Default MODELS_DIR */}
+                            <label className={`flex items-start gap-3 p-3 rounded-xl border-2 cursor-pointer transition-all
+                                ${dlDirMode === 'default' ? 'border-primary-500 bg-primary-50' : 'border-surface-200 hover:border-primary-200'}`}>
+                                <input type="radio" className="mt-0.5 accent-primary-500"
+                                    checked={dlDirMode === 'default'}
+                                    onChange={() => setDlDirMode('default')} />
+                                <div className="flex-1 min-w-0">
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-sm font-medium text-surface-900">Default models folder</span>
+                                        {downloadDirs.find(d => d.id === 'models_dir') && (
+                                            <span className="text-xs text-surface-400 ml-2 shrink-0">
+                                                {downloadDirs.find(d => d.id === 'models_dir').disk_free_gb?.toFixed(1)} GB free
+                                            </span>
+                                        )}
+                                    </div>
+                                    <p className="text-xs text-surface-400 mt-0.5 truncate font-mono">
+                                        {downloadDirs.find(d => d.id === 'models_dir')?.path || './models/'}
+                                    </p>
+                                    <span className="text-[10px] font-medium text-primary-600 bg-primary-100 px-1.5 py-0.5 rounded-full mt-1 inline-block">Recommended</span>
+                                </div>
+                            </label>
+
+                            {/* HF cache */}
+                            <label className={`flex items-start gap-3 p-3 rounded-xl border-2 cursor-pointer transition-all
+                                ${dlDirMode === 'hf_cache' ? 'border-primary-500 bg-primary-50' : 'border-surface-200 hover:border-primary-200'}`}>
+                                <input type="radio" className="mt-0.5 accent-primary-500"
+                                    checked={dlDirMode === 'hf_cache'}
+                                    onChange={() => setDlDirMode('hf_cache')} />
+                                <div className="flex-1 min-w-0">
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-sm font-medium text-surface-900">HuggingFace cache</span>
+                                        {downloadDirs.find(d => d.id === 'hf_cache') && (
+                                            <span className="text-xs text-surface-400 ml-2 shrink-0">
+                                                {downloadDirs.find(d => d.id === 'hf_cache').disk_free_gb?.toFixed(1)} GB free
+                                            </span>
+                                        )}
+                                    </div>
+                                    <p className="text-xs text-surface-400 mt-0.5 truncate font-mono">
+                                        {downloadDirs.find(d => d.id === 'hf_cache')?.path || '~/.cache/huggingface/hub'}
+                                    </p>
+                                </div>
+                            </label>
+
+                            {/* Custom path */}
+                            <label className={`flex items-start gap-3 p-3 rounded-xl border-2 cursor-pointer transition-all
+                                ${dlDirMode === 'custom' ? 'border-primary-500 bg-primary-50' : 'border-surface-200 hover:border-primary-200'}`}>
+                                <input type="radio" className="mt-0.5 accent-primary-500"
+                                    checked={dlDirMode === 'custom'}
+                                    onChange={() => setDlDirMode('custom')} />
+                                <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-1.5 mb-1.5">
+                                        <MapPin className="w-3.5 h-3.5 text-surface-500" />
+                                        <span className="text-sm font-medium text-surface-900">Custom path</span>
+                                    </div>
+                                    <input
+                                        type="text"
+                                        value={customDlPath}
+                                        onChange={(e) => { setCustomDlPath(e.target.value); setDlDirMode('custom'); }}
+                                        onClick={() => setDlDirMode('custom')}
+                                        placeholder="/absolute/path/to/directory"
+                                        className="w-full px-3 py-2 text-xs font-mono bg-white border border-surface-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500/30 placeholder:text-surface-300"
+                                    />
+                                    <p className="text-[10px] text-surface-400 mt-1">Must be an absolute path. The directory will be created if it doesn't exist.</p>
+                                </div>
+                            </label>
+                        </div>
+
+                        {/* Validation hint for custom path */}
+                        {dlDirMode === 'custom' && customDlPath.trim() && !customDlPath.trim().startsWith('/') && (
+                            <div className="flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                Path must be absolute (start with /)
+                            </div>
+                        )}
+
+                        {/* Actions */}
+                        <div className="flex gap-3 pt-1">
+                            <button
+                                onClick={() => setDownloadDialog(null)}
+                                className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-surface-100 text-surface-700 hover:bg-surface-200 transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={confirmDownloadDialog}
+                                disabled={dlDirMode === 'custom' && (!customDlPath.trim() || !customDlPath.trim().startsWith('/'))}
+                                className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-emerald-500 text-white hover:bg-emerald-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                            >
+                                <Download className="w-4 h-4" />
+                                Download {downloadDialog.sizeGb > 0 ? `(${downloadDialog.sizeGb} GB)` : ''}
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}

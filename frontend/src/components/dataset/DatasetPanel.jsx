@@ -43,7 +43,7 @@ export default function DatasetPanel({ projectId, datasets, setDatasets }) {
         try {
             const res = await datasetsAPI.preview(projectId, dataset.id);
             setPreview(res.data);
-        } catch (err) {
+        } catch {
             toast.error('Failed to load preview');
         } finally {
             setPreviewLoading(false);
@@ -58,7 +58,7 @@ export default function DatasetPanel({ projectId, datasets, setDatasets }) {
         setDeleteTarget(null);
         try {
             await datasetsAPI.delete(projectId, datasetId);
-        } catch (err) {
+        } catch {
             // Rollback on failure
             setDatasets(previousDatasets);
             toast.error('Failed to delete dataset');

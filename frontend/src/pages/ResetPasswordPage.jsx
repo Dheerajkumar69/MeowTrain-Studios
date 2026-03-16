@@ -28,7 +28,7 @@ function ForgotPasswordForm() {
         try {
             await authAPI.forgotPassword(email);
             setSubmitted(true);
-        } catch (err) {
+        } catch {
             // Always show success to prevent email enumeration
             setSubmitted(true);
         } finally {
@@ -136,7 +136,7 @@ function ResetPasswordForm({ token }) {
             setError('Password must contain at least one digit');
             return;
         }
-        if (!/[!@#$%^&*()_+\-=\[\]{}|;':",./<>?`~]/.test(password)) {
+        if (!/[!@#$%^&*()_+\-=[\]{}|;':",./<>?`~]/.test(password)) {
             setError('Password must contain at least one special character (!@#$%...)');
             return;
         }

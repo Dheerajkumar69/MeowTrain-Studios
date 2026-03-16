@@ -162,7 +162,12 @@ export const datasetsAPI = {
 export const modelsAPI = {
     list: () => api.get('/models/'),
     status: (modelId) => api.get(`/models/${encodeURIComponent(modelId)}/status`),
-    download: (modelId) => api.post(`/models/${encodeURIComponent(modelId)}/download`),
+    // download_path: optional absolute path — if omitted, server uses default models/ folder
+    download: (modelId, downloadPath = null) => api.post(
+        `/models/${encodeURIComponent(modelId)}/download`,
+        downloadPath ? { download_path: downloadPath } : {},
+    ),
+    downloadDirs: () => api.get('/models/download-dirs'),
     downloadProgress: (modelId) => api.get(`/models/${encodeURIComponent(modelId)}/download/progress`),
     cancelDownload: (modelId) => api.delete(`/models/${encodeURIComponent(modelId)}/download`),
     deleteCache: (modelId) => api.delete(`/models/${encodeURIComponent(modelId)}/cache`),

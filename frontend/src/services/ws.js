@@ -22,7 +22,7 @@ export function createWebSocket(projectId, onMessage, onError, onClose) {
     function connect() {
         try {
             ws = new WebSocket(url);
-        } catch (_err) {
+        } catch {
             scheduleReconnect();
             return null;
         }
@@ -47,7 +47,7 @@ export function createWebSocket(projectId, onMessage, onError, onClose) {
                     return;
                 }
                 onMessage(data);
-            } catch (_err) {
+            } catch {
                 // silently ignore parse errors
             }
         };

@@ -4,38 +4,34 @@
  * Tests that the API service correctly exposes the logoutAll method
  * and that token refresh / force-logout events work properly.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import axios from 'axios';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // We need to mock axios before importing the api module
-vi.mock('axios', () => {
-    const instance = {
-        get: vi.fn(),
-        post: vi.fn(),
-        put: vi.fn(),
-        patch: vi.fn(),
-        delete: vi.fn(),
-        interceptors: {
-            request: { use: vi.fn() },
-            response: { use: vi.fn() },
-        },
-        defaults: { headers: {} },
-    };
-    return {
-        default: { create: vi.fn(() => instance) },
-    };
-});
+const mockInstance = {
+    get: vi.fn(),
+    post: vi.fn(),
+    put: vi.fn(),
+    patch: vi.fn(),
+    delete: vi.fn(),
+    interceptors: {
+        request: { use: vi.fn() },
+        response: { use: vi.fn() },
+    },
+    defaults: { headers: {} },
+};
+
+vi.mock('axios', () => ({
+    default: { create: vi.fn(() => mockInstance) },
+}));
 
 describe('authAPI security methods', () => {
     let authAPI;
-    let apiInstance;
 
     beforeEach(async () => {
-        vi.resetModules();
+        vi.clearAllMocks();
+        // Dynamic import to get the module with our mock applied
         const mod = await import('../services/api.js');
         authAPI = mod.authAPI;
-        // The api instance is what axios.create returns
-        apiInstance = axios.default.create();
     });
 
     it('should have a logoutAll method', () => {
@@ -44,7 +40,7 @@ describe('authAPI security methods', () => {
 
     it('logoutAll should call POST /auth/logout-all', () => {
         authAPI.logoutAll();
-        expect(apiInstance.post).toHaveBeenCalledWith('/auth/logout-all');
+        expect(mockInstance.post).toHaveBeenCalledWith('/auth/logout-all');
     });
 
     it('should have a forgotPassword method for rate-limited endpoint', () => {
@@ -53,7 +49,7 @@ describe('authAPI security methods', () => {
 
     it('forgotPassword should call POST /auth/forgot-password', () => {
         authAPI.forgotPassword('test@test.com');
-        expect(apiInstance.post).toHaveBeenCalledWith('/auth/forgot-password', { email: 'test@test.com' });
+        expect(mockInstance.post).toHaveBeenCalledWith('/auth/forgot-password', { email: 'test@test.com' });
     });
 });
 

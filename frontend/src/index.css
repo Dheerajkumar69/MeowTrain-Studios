@@ -122,6 +122,19 @@ body {
   }
 }
 
+@keyframes slide-shimmer {
+  0% {
+    transform: translateX(-200%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+
+.animate-slide-shimmer {
+  animation: slide-shimmer 1.8s linear infinite;
+}
+
 .animate-fade-in {
   animation: fadeIn 0.4s ease-out forwards;
 }

@@ -31,7 +31,7 @@ export default function LoginPage() {
         try {
             await guestLogin();
             navigate('/');
-        } catch (err) {
+        } catch {
             setError('Guest login failed');
         } finally {
             setLoading(false);

@@ -1,0 +1,170 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  MeowTrain — HPC Deployment Guide (Full End-to-End)
+# ═══════════════════════════════════════════════════════════════════════
+#
+#  HPC details:
+#    Host : 10.0.64.50
+#    User : bodhi_chakraborty_x3t
+#
+#  Two ways to run on HPC:
+#    A) SLURM job (sbatch meowjob.sh)  — submits to job queue, GPU is allocated
+#    B) Interactive (two terminals)    — runs directly, good for testing/dev
+#
+#  Prerequisites (local): Python 3.10+, Node.js 18+, rsync
+#  Prerequisites (HPC):   Python 3.10+, CUDA drivers, SLURM scheduler
+
+
+# ══════════════════════════════════════════════════════════════════════
+# STEP 1 — Build frontend locally  (run on YOUR machine)
+# ══════════════════════════════════════════════════════════════════════
+
+cd ~/Code/actual\ project\ /Meow-Train/frontend
+npm install
+npm run build
+# Creates frontend/dist/ — the backend will serve this as a static site
+
+
+# ══════════════════════════════════════════════════════════════════════
+# STEP 2 — Transfer project to HPC  (run on YOUR machine)
+# ══════════════════════════════════════════════════════════════════════
+
+rsync -avz --progress \
+  --exclude=venv --exclude=.venv \
+  --exclude=node_modules \
+  --exclude=.git \
+  --exclude='*.db*' \
+  --exclude=__pycache__ \
+  --exclude=models \
+  --exclude='*.pyc' \
+  "/home/dheeraj/Code/actual project /Meow-Train/" \
+  bodhi_chakraborty_x3t@10.0.64.50:~/Meow-Train/
+
+# NOTE: frontend/dist/ IS included (needed by the backend to serve the UI)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# STEP 3 — First-time setup on HPC  (SSH in and run once)
+# ══════════════════════════════════════════════════════════════════════
+
+ssh bodhi_chakraborty_x3t@10.0.64.50
+
+cd ~/Meow-Train
+
+# ── 3a: Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# ── 3b: Install all dependencies (auto-detects GPU + CUDA version)
+python3 setup.py
+
+# ── 3c: Create the logs directory (used by the SLURM job)
+mkdir -p ~/Meow-Train/logs
+
+# You only need to do this once.
+# Next time you can skip straight to Step 4 or Step 5.
+
+
+# ══════════════════════════════════════════════════════════════════════
+# STEP 4A — SLURM job (recommended for long runs)
+# ══════════════════════════════════════════════════════════════════════
+#
+# The file meowjob.sh is already in the project root.
+# It tells SLURM: give me 1 GPU, 16GB RAM, 8 CPUs for 12 hours.
+# Edit it if your HPC has different partition names or you need more.
+#
+# ─────────────────── meowjob.sh (key settings) ──────────────────────
+#   #SBATCH --partition=gpu        ← partition name (ask your HPC admin)
+#   #SBATCH --gres=gpu:1           ← number of GPUs
+#   #SBATCH --mem=16G              ← RAM
+#   #SBATCH --cpus-per-task=8      ← CPU cores
+#   #SBATCH --time=12:00:00        ← max run time (HH:MM:SS)
+# ────────────────────────────────────────────────────────────────────
+
+# SSH into HPC:
+ssh bodhi_chakraborty_x3t@10.0.64.50
+
+cd ~/Meow-Train
+
+# Submit the job:
+sbatch meowjob.sh
+
+# Check job status:
+squeue -u bodhi_chakraborty_x3t
+
+# Watch live log (replace JOBID with the number from sbatch output):
+tail -f logs/meow_JOBID.log
+
+# Cancel job if needed:
+scancel JOBID
+
+
+# ══════════════════════════════════════════════════════════════════════
+# STEP 4B — Interactive mode (two terminals, no SLURM queue)
+# ══════════════════════════════════════════════════════════════════════
+#
+# Good for quick testing. The server dies when you close the terminal.
+
+# ── Terminal 1: Run the backend ──────────────────────────────────────
+ssh bodhi_chakraborty_x3t@10.0.64.50
+
+cd ~/Meow-Train
+source .venv/bin/activate
+cd backend
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# You'll see: "Serving frontend from .../frontend/dist (bare-metal mode)"
+# Keep Terminal 1 open — server runs as long as this is alive.
+
+# ── Terminal 2: SSH tunnel (open on YOUR local machine) ──────────────
+ssh -L 8000:localhost:8000 bodhi_chakraborty_x3t@10.0.64.50
+
+# Keep Terminal 2 open — tunnel stays alive as long as this is open.
+# Then visit: http://localhost:8000
+
+
+# ══════════════════════════════════════════════════════════════════════
+# STEP 5 — Access the app (both methods)
+# ══════════════════════════════════════════════════════════════════════
+#
+# For SLURM (4A):
+#   Open a second terminal on your local machine and run the tunnel:
+#   ssh -L 8000:localhost:8000 bodhi_chakraborty_x3t@10.0.64.50
+#   Then open: http://localhost:8000
+#
+# For Interactive (4B):
+#   Terminal 2 is already your tunnel — open: http://localhost:8000
+
+
+# ══════════════════════════════════════════════════════════════════════
+# TROUBLESHOOTING
+# ══════════════════════════════════════════════════════════════════════
+
+# Is the app running?
+#   curl http://localhost:8000/api/health
+
+# Is GPU visible to the job?
+#   nvidia-smi                     (run on HPC)
+#   — or check the job log: tail logs/meow_JOBID.log
+
+# What partition names does the HPC have?
+#   sinfo                          (run on HPC — lists all partitions)
+
+# What SLURM job limits apply to you?
+#   sacctmgr show user $USER       (quotas, max walltime etc.)
+
+# Dependencies broken / need reinstall?
+#   source .venv/bin/activate
+#   python3 setup.py --reinstall
+
+# Backend logs (interactive mode):
+#   Visible live in Terminal 1 (the uvicorn session)
+
+# Backend logs (SLURM mode):
+#   tail -f ~/Meow-Train/logs/meow_JOBID.log
+#   cat ~/Meow-Train/logs/meow_JOBID.err    (for errors)
+
+# Restart backend (interactive mode):
+#   Ctrl+C in Terminal 1, then run uvicorn again (repeat Step 4B)
+
+# NOTE: If you close either terminal in interactive mode, the server/tunnel dies.
+#       For persistent runs, use SLURM (Step 4A).

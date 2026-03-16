@@ -14,17 +14,7 @@ import ChatView from './ChatView';
 import ChatInput from './ChatInput';
 import SettingsPanel from './SettingsPanel';
 
-export default function PlaygroundPanel({ projectId, project, datasets }) {
-    // Guard: projectId is required for all API calls
-    if (!projectId) {
-        return (
-            <div className="flex flex-col items-center justify-center py-16 text-center">
-                <AlertTriangle className="w-8 h-8 text-surface-400 mb-3" />
-                <p className="text-sm text-surface-500">No project selected. Please navigate to a project first.</p>
-            </div>
-        );
-    }
-
+export default function PlaygroundPanel({ projectId, datasets }) {
     const [messages, setMessages] = useState([]);
     const [input, setInput] = useState('');
     const [systemPrompt, setSystemPrompt] = useState('You are a helpful assistant.');
@@ -64,6 +54,7 @@ export default function PlaygroundPanel({ projectId, project, datasets }) {
     }, []);
 
     useEffect(() => {
+        if (!projectId) return;
         // Load LM Studio config
         lmstudioAPI.getConfig().then((res) => {
             setLmsConfig(res.data);
@@ -195,6 +186,16 @@ export default function PlaygroundPanel({ projectId, project, datasets }) {
         }
     }, []);
 
+    // Guard: projectId is required for all API calls — placed after hooks
+    if (!projectId) {
+        return (
+            <div className="flex flex-col items-center justify-center py-16 text-center">
+                <AlertTriangle className="w-8 h-8 text-surface-400 mb-3" />
+                <p className="text-sm text-surface-500">No project selected. Please navigate to a project first.</p>
+            </div>
+        );
+    }
+
     const toggleContext = (id) => {
         setSelectedContextIds((prev) =>
             prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
@@ -262,13 +263,11 @@ export default function PlaygroundPanel({ projectId, project, datasets }) {
                 <ChatView
                     messages={messages}
                     loading={loading}
-                    streamAbortRef={streamAbortRef}
                     cancelStream={cancelStream}
                     modelInfo={modelInfo}
                     modelChecking={modelChecking}
                     lmsConnected={lmsConnected}
                     selectedLmsModel={selectedLmsModel}
-                    lmsConfig={lmsConfig}
                     onShowLMStudio={setShowLMStudio}
                     messagesEndRef={messagesEndRef}
                 />

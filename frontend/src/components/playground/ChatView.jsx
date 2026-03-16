@@ -6,9 +6,9 @@ import {
 } from 'lucide-react';
 
 export default function ChatView({
-    messages, loading, streamAbortRef, cancelStream,
+    messages, loading, cancelStream,
     modelInfo, modelChecking, lmsConnected, selectedLmsModel,
-    lmsConfig, onShowLMStudio, messagesEndRef,
+    onShowLMStudio, messagesEndRef,
 }) {
     return (
         <div className="flex-1 overflow-auto p-5 space-y-4">
@@ -59,7 +59,7 @@ export default function ChatView({
                     <div className="w-8 h-8 rounded-lg bg-primary-100 flex items-center justify-center">
                         <Bot className="w-4 h-4 text-primary-600" aria-hidden="true" />
                     </div>
-                    {streamAbortRef?.current ? (
+                    {cancelStream ? (
                         <button
                             onClick={cancelStream}
                             className="text-xs text-surface-500 hover:text-danger-500 bg-surface-50 border border-surface-200 rounded-xl px-3 py-1.5 transition-colors focus:outline-none focus:ring-2 focus:ring-danger-500/50"

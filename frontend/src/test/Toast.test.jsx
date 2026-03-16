@@ -2,7 +2,7 @@
  * Toast system tests — rendering, auto-dismiss, toast types, dismiss button
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, act, waitFor } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ToastProvider, useToast } from '../components/Toast';
 
@@ -88,7 +88,7 @@ describe('Toast', () => {
     });
 
     it('useToast() throws when used outside ToastProvider', () => {
-        const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const spy = vi.spyOn(console, 'error').mockImplementation(() => { });
         function Bad() { useToast(); return null; }
         expect(() => render(<Bad />)).toThrow('useToast must be used within ToastProvider');
         spy.mockRestore();

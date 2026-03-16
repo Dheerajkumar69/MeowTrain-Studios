@@ -9,21 +9,21 @@ class TestEmailValidation:
     def test_register_invalid_email_no_at(self, client):
         resp = client.post("/api/auth/register", json={
             "email": "notanemail",
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
         })
         assert resp.status_code == 422  # Pydantic validation error
 
     def test_register_invalid_email_no_domain(self, client):
         resp = client.post("/api/auth/register", json={
             "email": "user@",
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
         })
         assert resp.status_code == 422
 
     def test_register_valid_email(self, client):
         resp = client.post("/api/auth/register", json={
             "email": "valid@example.com",
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
         })
         assert resp.status_code == 200
 
@@ -32,7 +32,7 @@ class TestDisplayNameCap:
     def test_display_name_too_long(self, client):
         resp = client.post("/api/auth/register", json={
             "email": "cap@test.com",
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
             "display_name": "x" * 101,  # exceeds 100 char cap
         })
         assert resp.status_code == 422
@@ -40,7 +40,7 @@ class TestDisplayNameCap:
     def test_display_name_at_limit(self, client):
         resp = client.post("/api/auth/register", json={
             "email": "cap@test.com",
-            "password": "SecurePass1",
+            "password": "SecurePass1!",
             "display_name": "x" * 100,  # exactly at cap
         })
         assert resp.status_code == 200

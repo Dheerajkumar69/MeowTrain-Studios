@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models.background_task import BackgroundTask
-from app.config import MODEL_CACHE_DIR
+from app.config import MODEL_CACHE_DIR, MODELS_DIR
 
 logger = logging.getLogger("meowllm.models")
 
@@ -227,26 +227,115 @@ def check_compatibility(model: dict, hw: dict) -> str:
         return "too_large"
 
 
-def is_model_cached(model_id: str, *, deep_check: bool = False) -> bool:
-    """Check if a model is already cached locally with integrity validation."""
-    model_dir_name = "models--" + model_id.replace("/", "--")
+def is_model_cached(model_id: str, *, deep_check: bool = False, extra_paths: list[str] | None = None) -> bool:
+    """Check if a model is already cached locally with integrity validation.
 
+    Searches (in order):
+    1. Default HuggingFace hub cache (~/.cache/huggingface/hub) — HF snapshot format
+    2. App MODEL_CACHE_DIR — HF snapshot format
+    3. MODELS_DIR/<model_safe_name>/ — flat local_dir format (preferred new location)
+    4. Any extra_paths provided (flat local_dir format)
+    """
+    model_dir_name = "models--" + model_id.replace("/", "--")
+    model_safe_name = model_id.replace("/", "--")
+
+    # ── 1. HuggingFace default cache (HF snapshot format) ───────────
     hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
     hf_model_dir = os.path.join(hf_cache, model_dir_name)
     if os.path.isdir(hf_model_dir):
         if validate_snapshot_dir(hf_model_dir, deep_check=deep_check):
             return True
 
+    # ── 2. App MODEL_CACHE_DIR (HF snapshot format) ──────────────────
     app_model_dir = MODEL_CACHE_DIR / model_dir_name
     if app_model_dir.is_dir():
         if validate_snapshot_dir(str(app_model_dir), deep_check=deep_check):
             return True
 
+    # ── 3. MODELS_DIR flat local_dir format ──────────────────────────
+    flat_dir = MODELS_DIR / model_safe_name
+    if flat_dir.is_dir():
+        if validate_flat_model_dir(str(flat_dir), deep_check=deep_check):
+            return True
+
+    # Also scan MODELS_DIR top-level for any sub-directory matching model_id variations
+    if MODELS_DIR.is_dir():
+        for candidate in MODELS_DIR.iterdir():
+            if not candidate.is_dir():
+                continue
+            # Match by exact name or slash-replaced variants
+            cname = candidate.name.lower()
+            mid_variants = {
+                model_id.lower(),
+                model_id.lower().replace("/", "--"),
+                model_id.lower().replace("/", "_"),
+                model_id.split("/")[-1].lower(),
+            }
+            if cname in mid_variants:
+                if validate_flat_model_dir(str(candidate), deep_check=deep_check):
+                    return True
+                if validate_snapshot_dir(str(candidate), deep_check=deep_check):
+                    return True
+
+    # ── 4. Any caller-supplied extra paths ───────────────────────────
+    if extra_paths:
+        for p in extra_paths:
+            if not p or not os.path.isdir(p):
+                continue
+            if validate_flat_model_dir(p, deep_check=deep_check):
+                return True
+            if validate_snapshot_dir(p, deep_check=deep_check):
+                return True
+
     return False
 
 
+def get_model_local_path(model_id: str) -> str | None:
+    """Return the local filesystem path of a cached model, or None if not cached.
+
+    Prefers the flat MODELS_DIR structure over the HF cache structure so that
+    the returned path can be used directly with from_pretrained().
+    """
+    model_dir_name = "models--" + model_id.replace("/", "--")
+    model_safe_name = model_id.replace("/", "--")
+
+    # ── MODELS_DIR flat format (preferred) ───────────────────────────
+    flat_dir = MODELS_DIR / model_safe_name
+    if flat_dir.is_dir() and validate_flat_model_dir(str(flat_dir)):
+        return str(flat_dir)
+
+    # Scan MODELS_DIR for variants
+    if MODELS_DIR.is_dir():
+        for candidate in MODELS_DIR.iterdir():
+            if not candidate.is_dir():
+                continue
+            cname = candidate.name.lower()
+            mid_variants = {
+                model_id.lower(),
+                model_id.lower().replace("/", "--"),
+                model_id.split("/")[-1].lower(),
+            }
+            if cname in mid_variants:
+                if validate_flat_model_dir(str(candidate)):
+                    return str(candidate)
+
+    # ── HF snapshot caches — return the snapshot sub-directory ───────
+    for base_dir in [os.path.expanduser("~/.cache/huggingface/hub"), str(MODEL_CACHE_DIR)]:
+        hf_model_dir = os.path.join(base_dir, model_dir_name)
+        if os.path.isdir(hf_model_dir) and validate_snapshot_dir(hf_model_dir):
+            snapshots_dir = os.path.join(hf_model_dir, "snapshots")
+            try:
+                snaps = sorted(os.listdir(snapshots_dir))
+                if snaps:
+                    return os.path.join(snapshots_dir, snaps[-1])
+            except OSError:
+                pass
+
+    return None
+
+
 def validate_snapshot_dir(model_dir: str, *, deep_check: bool = False) -> bool:
-    """Validate that a model cache directory has a complete snapshot."""
+    """Validate that a model cache directory has a complete HF snapshot."""
     try:
         snapshots_dir = os.path.join(model_dir, "snapshots")
         if not os.path.isdir(snapshots_dir):
@@ -294,19 +383,61 @@ def validate_snapshot_dir(model_dir: str, *, deep_check: bool = False) -> bool:
         return False
 
 
-def get_disk_free_gb() -> float:
-    """Get free disk space in GB where models are cached."""
+def validate_flat_model_dir(model_dir: str, *, deep_check: bool = False) -> bool:
+    """Validate a model directory downloaded with local_dir (flat structure).
+
+    In this format files sit directly inside model_dir/ (no snapshots/ sub-tree).
+    Minimum requirement: a non-empty, valid config.json must be present.
+    """
     try:
-        hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
-        os.makedirs(hf_cache, exist_ok=True)
-        usage = shutil.disk_usage(hf_cache)
-        return round(usage.free / (1024 ** 3), 2)
-    except OSError:
+        config_path = os.path.join(model_dir, "config.json")
+        if not os.path.isfile(config_path):
+            return False
+        if os.path.getsize(config_path) == 0:
+            logger.warning("Empty config.json in flat model dir: %s", model_dir)
+            return False
+
+        import json as _json
         try:
-            usage = shutil.disk_usage("/")
+            with open(config_path, "r") as f:
+                _json.load(f)
+        except (_json.JSONDecodeError, OSError) as e:
+            logger.warning("Corrupt config.json in flat model dir %s: %s", model_dir, e)
+            return False
+
+        if deep_check:
+            # Extra validation: every file should be non-empty
+            for entry in os.scandir(model_dir):
+                if entry.is_file() and entry.stat().st_size == 0:
+                    logger.warning("Empty file in flat model dir: %s", entry.path)
+                    return False
+
+        return True
+    except OSError as e:
+        logger.debug("Error validating flat model dir %s: %s", model_dir, e)
+        return False
+
+
+def get_disk_free_gb(path: str | None = None) -> float:
+    """Get free disk space in GB at the given path (defaults to MODELS_DIR).
+
+    Falls back gracefully through: given path → MODELS_DIR → HF cache dir → /
+    """
+    candidates = []
+    if path:
+        candidates.append(path)
+    candidates.append(str(MODELS_DIR))
+    candidates.append(os.path.expanduser("~/.cache/huggingface/hub"))
+    candidates.append("/")
+
+    for p in candidates:
+        try:
+            os.makedirs(p, exist_ok=True)
+            usage = shutil.disk_usage(p)
             return round(usage.free / (1024 ** 3), 2)
         except OSError:
-            return 0.0
+            continue
+    return 0.0
 
 
 def check_hf_reachable() -> tuple[bool, str]:
