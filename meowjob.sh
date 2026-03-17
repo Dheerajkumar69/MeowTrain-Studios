@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:1                   # Request 1 GPU (SLURM can't do %; we cap at 60% below)
 #SBATCH --cpus-per-task=18            # CPU cores (for DataLoader workers etc.)
 #SBATCH --mem=64G                      # RAM
-#SBATCH --time=UNLIMITED              # No time limit
+#SBATCH --time=24:00:00               # Max wall time — increase if cluster allows more
 #SBATCH --nodes=1                      # Run on a single node
 
 # ── Setup ─────────────────────────────────────────────────────────────
