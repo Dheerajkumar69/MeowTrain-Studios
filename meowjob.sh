@@ -17,14 +17,17 @@ echo "GPU(s)   : $CUDA_VISIBLE_DEVICES"
 echo "Date     : $(date)"
 echo "=========================================="
 
+# Absolute path to project root (works from symlink in ~/bin too)
+PROJECT_DIR="$HOME/Meow-Train"
+
 # Create logs directory if it doesn't exist
-mkdir -p ~/Meow-Train/logs
+mkdir -p "$PROJECT_DIR/logs"
 
 # Go to project directory
-cd ~/Meow-Train
+cd "$PROJECT_DIR"
 
-# Activate virtual environment
-source .venv/bin/activate
+# Activate virtual environment (absolute path — safe from any working dir)
+source "$PROJECT_DIR/.venv/bin/activate"
 
 # ── Cap GPU usage to 60% ──────────────────────────────────────────────
 # SLURM only allocates whole GPU cards — % capping is done at app level:
@@ -51,7 +54,7 @@ echo "Starting MeowTrain backend on port 8000..."
 echo "Frontend will be served from: frontend/dist/"
 echo ""
 
-cd backend
+cd "$PROJECT_DIR/backend"
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 echo "=== MeowTrain Job Done ==="
